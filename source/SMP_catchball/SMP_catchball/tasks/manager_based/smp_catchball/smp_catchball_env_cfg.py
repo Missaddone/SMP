@@ -6,10 +6,12 @@
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.managers import CommandTermCfg as CmdTerm
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
+from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
@@ -62,6 +64,13 @@ class ActionsCfg:
 
 
 @configclass
+class CommandsCfg:
+    """Command specifications for the MDP."""
+
+    pass
+
+
+@configclass
 class ObservationsCfg:
     """Observation specifications for the MDP."""
 
@@ -90,7 +99,15 @@ class EventCfg:
         mode="startup",
         params={
             "ckpt_path": "D:/OpenSource_Project/smp-master/datasets/pretrain_ckpt/pretrained_loco.pt",
+            "gsi_buffer_size": 4096,
+            "gsi_batch_size": 1024,
         },
+    )
+    gsi_reset = EventTerm(func=mdp.gsi_reset, mode="reset")
+    gsi_refresh = EventTerm(
+        func=mdp.gsi_refresh,
+        mode="step",
+        params={"num_samples": 1024, "step_interval": 2400},
     )
 
 
@@ -138,6 +155,7 @@ class SmpEnvCfg(ManagerBasedRLEnvCfg):
     # Basic settings
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
+    commands: CommandsCfg = CommandsCfg()
     events: EventCfg = EventCfg()
     # MDP settings
     rewards: RewardsCfg = RewardsCfg()
@@ -155,3 +173,64 @@ class SmpEnvCfg(ManagerBasedRLEnvCfg):
         # simulation settings
         self.sim.dt = 1 / 200
         self.sim.render_interval = self.decimation
+
+
+@configclass
+class ForwardCommandsCfg(CommandsCfg):
+    """Forward locomotion command configuration."""
+
+    steering: CmdTerm = mdp.SteeringCommandCfg(
+        asset_name="robot",
+        resampling_time_range=(3.0, 8.0),
+        rand_tar_dir=False,
+        rand_face_dir=False,
+        tar_speed_min=0.5,
+        tar_speed_max=5.0,
+    )
+
+
+@configclass
+class ForwardObservationsCfg(ObservationsCfg):
+    @configclass
+    class PolicyCfg(ObservationsCfg.PolicyCfg):
+        command = ObsTerm(func=mdp.generated_commands, params={"command_name": "steering"})
+
+    policy: PolicyCfg = PolicyCfg()
+
+
+@configclass
+class ForwardRewardsCfg(RewardsCfg):
+    smp = None
+    task_smp_product = RewTerm(
+        func=mdp.task_smp_product,
+        weight=1.0,
+        params={
+            "task_terms": (
+                (
+                    mdp.steering_target_velocity,
+                    1.0,
+                    {"command_name": "steering", "vel_err_scale": 0.5},
+                ),
+            ),
+            "fixed_timesteps": (8, 15, 22),
+            "ws": 6.0,
+        },
+    )
+
+
+@configclass
+class ForwardTerminationsCfg(TerminationsCfg):
+    base_too_low = DoneTerm(
+        func=mdp.root_height_below_minimum,
+        params={"minimum_height": 0.3, "asset_cfg": SceneEntityCfg("robot")},
+    )
+
+
+@configclass
+class SmpG1ForwardEnvCfg(SmpEnvCfg):
+    """G1 forward locomotion task with SMP guidance."""
+
+    commands: ForwardCommandsCfg = ForwardCommandsCfg()
+    observations: ForwardObservationsCfg = ForwardObservationsCfg()
+    rewards: ForwardRewardsCfg = ForwardRewardsCfg()
+    terminations: ForwardTerminationsCfg = ForwardTerminationsCfg()

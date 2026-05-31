@@ -101,3 +101,56 @@ def smp_guidance_reward(
     env._smp_raw_err = total_raw / len(fixed_timesteps)
     err = total_err / len(fixed_timesteps)
     return torch.exp(-err * ws)
+
+
+def task_smp_product(
+    env: ManagerBasedRLEnv,
+    task_terms: tuple[tuple[callable, float, dict], ...],
+    fixed_timesteps: tuple[int, ...] = (8, 15, 22),
+    ws: float = 6.0,
+) -> torch.Tensor:
+    """Multiplicative task reward gated by SMP guidance."""
+    task = sum(weight * func(env, **kwargs) for func, weight, kwargs in task_terms)
+    return task * smp_guidance_reward(env, fixed_timesteps=fixed_timesteps, ws=ws)
+
+
+def _root_lin_vel_w(data) -> torch.Tensor:
+    return data.root_link_lin_vel_w if hasattr(data, "root_link_lin_vel_w") else data.root_lin_vel_w
+
+
+def _heading_w(data) -> torch.Tensor:
+    if hasattr(data, "heading_w"):
+        return data.heading_w
+    quat = data.root_link_quat_w if hasattr(data, "root_link_quat_w") else data.root_quat_w
+    w, x, y, z = quat.unbind(dim=-1)
+    return torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def steering_target_velocity(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    vel_err_scale: float = 0.5,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Track commanded world-frame xy velocity, zeroing backwards motion."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    command = env.command_manager.get_term(command_name)
+    root_vel_xy = _root_lin_vel_w(asset.data)[:, :2]
+    tar_vel = command.tar_speed.unsqueeze(-1) * command.tar_dir_w
+    vel_err = ((tar_vel - root_vel_xy) ** 2).sum(dim=-1)
+    proj_speed = (command.tar_dir_w * root_vel_xy).sum(dim=-1)
+    reward = torch.exp(-vel_err_scale * vel_err)
+    return torch.where(proj_speed < 0.0, torch.zeros_like(reward), reward)
+
+
+def steering_face_direction(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Reward alignment between commanded face direction and robot heading."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    command = env.command_manager.get_term(command_name)
+    heading_w = _heading_w(asset.data)
+    char_face_w = torch.stack([torch.cos(heading_w), torch.sin(heading_w)], dim=-1)
+    return (command.face_dir_w * char_face_w).sum(dim=-1).clamp_min(0.0)
