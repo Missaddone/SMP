@@ -78,4 +78,7 @@ tests/
 
 /.vscode/
 /.codex/
+# EN: Keep the migrated asset directory in git while ignoring generated/imported assets.
+# 中文：保留迁移后的 assets 目录本身，但忽略后续生成或导入的大资产文件。
 /source/SMP_catchball/SMP_catchball/assets/*
+!/source/SMP_catchball/SMP_catchball/assets/.gitkeep

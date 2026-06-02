@@ -3,6 +3,8 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+from pathlib import Path
+
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
@@ -14,11 +16,23 @@ from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
+from isaaclab.utils.noise import UniformNoiseCfg as Unoise
 
 from SMP_catchball.robots.g1 import G1_ACTION_SCALE, G1_CYLINDER_CFG
+from SMP_catchball.smp.feature_to_state import G1_JOINT_NAMES
 
 from . import mdp
+
+
+# EN: Resolve checkpoints relative to this migrated project instead of the
+# original Windows smp-master path. This keeps launches independent of cwd.
+# 中文：预训练模型路径从当前迁移工程解析，不再使用原工程的 Windows 绝对路径；
+# 这样从任意工作目录启动脚本都能找到 datasets/pretrain_ckpt。
+PROJECT_ROOT = Path(__file__).resolve().parents[6]
+PRETRAIN_CKPT_DIR = PROJECT_ROOT / "datasets" / "pretrain_ckpt"
+G1_JOINT_NAMES_LIST = list(G1_JOINT_NAMES)
 
 
 ##
@@ -39,6 +53,9 @@ class SmpCatchballSceneCfg(InteractiveSceneCfg):
     # robot
     robot: ArticulationCfg = G1_CYLINDER_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
+    # contact sensors
+    contact_forces = ContactSensorCfg(prim_path="{ENV_REGEX_NS}/Robot/.*", history_length=3)
+
     # lights
     dome_light = AssetBaseCfg(
         prim_path="/World/DomeLight",
@@ -57,7 +74,8 @@ class ActionsCfg:
 
     joint_pos = mdp.JointPositionActionCfg(
         asset_name="robot",
-        joint_names=[".*"],
+        joint_names=G1_JOINT_NAMES_LIST,
+        preserve_order=True,
         scale=G1_ACTION_SCALE,
         use_default_offset=True,
     )
@@ -79,26 +97,90 @@ class ObservationsCfg:
         """Observations for policy group."""
 
         # observation terms (order preserved)
-        joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel)
-        joint_vel_rel = ObsTerm(func=mdp.joint_vel_rel)
+        base_lin_vel = ObsTerm(func=mdp.base_lin_vel, noise=Unoise(n_min=-0.5, n_max=0.5))
+        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=Unoise(n_min=-0.2, n_max=0.2))
+        projected_gravity = ObsTerm(func=mdp.projected_gravity, noise=Unoise(n_min=-0.05, n_max=0.05))
+        joint_pos_rel = ObsTerm(
+            func=mdp.joint_pos_rel,
+            noise=Unoise(n_min=-0.01, n_max=0.01),
+            params={
+                "asset_cfg": SceneEntityCfg("robot", joint_names=G1_JOINT_NAMES_LIST, preserve_order=True),
+            },
+        )
+        joint_vel_rel = ObsTerm(
+            func=mdp.joint_vel_rel,
+            noise=Unoise(n_min=-1.5, n_max=1.5),
+            params={
+                "asset_cfg": SceneEntityCfg("robot", joint_names=G1_JOINT_NAMES_LIST, preserve_order=True),
+            },
+        )
+        actions = ObsTerm(func=mdp.last_action)
+
+        def __post_init__(self) -> None:
+            self.enable_corruption = True
+            self.concatenate_terms = True
+
+    @configclass
+    class CriticCfg(ObsGroup):
+        """Uncorrupted critic observations with short history, matching the original SMP setup."""
+
+        base_lin_vel = ObsTerm(func=mdp.base_lin_vel)
+        base_ang_vel = ObsTerm(func=mdp.base_ang_vel)
+        projected_gravity = ObsTerm(func=mdp.projected_gravity)
+        joint_pos_rel = ObsTerm(
+            func=mdp.joint_pos_rel,
+            params={
+                "asset_cfg": SceneEntityCfg("robot", joint_names=G1_JOINT_NAMES_LIST, preserve_order=True),
+            },
+        )
+        joint_vel_rel = ObsTerm(
+            func=mdp.joint_vel_rel,
+            params={
+                "asset_cfg": SceneEntityCfg("robot", joint_names=G1_JOINT_NAMES_LIST, preserve_order=True),
+            },
+        )
+        actions = ObsTerm(func=mdp.last_action)
 
         def __post_init__(self) -> None:
             self.enable_corruption = False
             self.concatenate_terms = True
+            self.history_length = 10
 
     # observation groups
     policy: PolicyCfg = PolicyCfg()
+    critic: CriticCfg = CriticCfg()
 
 
 @configclass
 class EventCfg:
     """Configuration for events."""
 
+    foot_friction = EventTerm(
+        func=mdp.randomize_rigid_body_material,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*ankle_roll_link"),
+            "static_friction_range": (0.3, 1.2),
+            "dynamic_friction_range": (0.3, 1.2),
+            "restitution_range": (0.0, 0.0),
+            "num_buckets": 64,
+        },
+    )
+    base_com = EventTerm(
+        func=mdp.randomize_rigid_body_com,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names="torso_link"),
+            "com_range": {"x": (-0.025, 0.025), "y": (-0.025, 0.025), "z": (-0.03, 0.03)},
+        },
+    )
     init_smp_state = EventTerm(
         func=mdp.init_smp_state,
         mode="startup",
         params={
-            "ckpt_path": "D:/OpenSource_Project/smp-master/datasets/pretrain_ckpt/pretrained_loco.pt",
+            # EN: Forward task uses the locomotion prior by default.
+            # 中文：Forward 任务默认使用 locomotion 预训练 prior。
+            "ckpt_path": str(PRETRAIN_CKPT_DIR / "pretrained_loco.pt"),
             "gsi_buffer_size": 4096,
             "gsi_batch_size": 1024,
         },
@@ -106,8 +188,26 @@ class EventCfg:
     gsi_reset = EventTerm(func=mdp.gsi_reset, mode="reset")
     gsi_refresh = EventTerm(
         func=mdp.gsi_refresh,
-        mode="step",
-        params={"num_samples": 1024, "step_interval": 2400},
+        mode="interval",
+        interval_range_s=(48.0, 48.0),
+        is_global_time=True,
+        params={"num_samples": 1024},
+    )
+    push_robot = EventTerm(
+        func=mdp.push_by_setting_velocity,
+        mode="interval",
+        interval_range_s=(1.0, 3.0),
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "velocity_range": {
+                "x": (-0.5, 0.5),
+                "y": (-0.5, 0.5),
+                "z": (-0.4, 0.4),
+                "roll": (-0.52, 0.52),
+                "pitch": (-0.52, 0.52),
+                "yaw": (-0.78, 0.78),
+            },
+        },
     )
 
 
@@ -135,6 +235,12 @@ class TerminationsCfg:
     """Termination terms for the MDP."""
 
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
+    # EN: This is trunk/base contact against anything, not pure Robot-vs-Robot self-collision.
+    # 中文：这里检测的是 pelvis/torso 与任意物体的接触，不是严格的机器人自碰撞。
+    base_contact = DoneTerm(
+        func=mdp.illegal_contact,
+        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names="(pelvis|torso_link)"), "threshold": 1.0},
+    )
 
 
 ##
@@ -195,23 +301,25 @@ class ForwardObservationsCfg(ObservationsCfg):
     class PolicyCfg(ObservationsCfg.PolicyCfg):
         command = ObsTerm(func=mdp.generated_commands, params={"command_name": "steering"})
 
+    @configclass
+    class CriticCfg(ObservationsCfg.CriticCfg):
+        command = ObsTerm(func=mdp.generated_commands, params={"command_name": "steering"})
+
     policy: PolicyCfg = PolicyCfg()
+    critic: CriticCfg = CriticCfg()
 
 
 @configclass
 class ForwardRewardsCfg(RewardsCfg):
+    alive = None
+    terminating = None
     smp = None
     task_smp_product = RewTerm(
-        func=mdp.task_smp_product,
+        func=mdp.forward_task_smp_product,
         weight=1.0,
         params={
-            "task_terms": (
-                (
-                    mdp.steering_target_velocity,
-                    1.0,
-                    {"command_name": "steering", "vel_err_scale": 0.5},
-                ),
-            ),
+            "command_name": "steering",
+            "vel_err_scale": 0.5,
             "fixed_timesteps": (8, 15, 22),
             "ws": 6.0,
         },
@@ -220,6 +328,10 @@ class ForwardRewardsCfg(RewardsCfg):
 
 @configclass
 class ForwardTerminationsCfg(TerminationsCfg):
+    # EN: Disable trunk/base contact termination for Forward to isolate the
+    # locomotion convergence issue against the original SMP setup.
+    # 中文：Forward 任务先关闭躯干/根部接触终止，用来排除迁移后该项过早终止对收敛的影响。
+    base_contact = None
     base_too_low = DoneTerm(
         func=mdp.root_height_below_minimum,
         params={"minimum_height": 0.3, "asset_cfg": SceneEntityCfg("robot")},

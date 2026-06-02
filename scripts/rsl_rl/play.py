@@ -34,6 +34,12 @@ parser.add_argument(
     help="Use the pre-trained checkpoint from Nucleus.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument(
+    "--export_onnx",
+    action="store_true",
+    default=False,
+    help="Export the policy to ONNX before playback. Disabled by default because playback only needs PyTorch/JIT.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -92,6 +98,19 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import SMP_catchball.tasks  # noqa: F401
+
+
+def _warn_optional_onnx_export_failed(exc: Exception) -> None:
+    """Report optional ONNX export failures without stopping playback.
+
+    EN: Playing a checkpoint only needs the PyTorch policy. ONNX is a
+    convenience export artifact, so a missing ``onnx`` package should not block
+    visual inspection/debug playback.
+
+    中文：播放 checkpoint 只需要 PyTorch policy；ONNX 只是附带导出产物。
+    缺少 ``onnx`` 包时不应该阻止可视化调试。
+    """
+    print(f"[WARNING] Skipping ONNX export: {exc}")
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -173,7 +192,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if version.parse(installed_version) >= version.parse("4.0.0"):
         # use the new export functions for rsl-rl >= 4.0.0
         runner.export_policy_to_jit(path=export_model_dir, filename="policy.pt")
-        runner.export_policy_to_onnx(path=export_model_dir, filename="policy.onnx")
+        if args_cli.export_onnx:
+            try:
+                runner.export_policy_to_onnx(path=export_model_dir, filename="policy.onnx")
+            except Exception as exc:
+                _warn_optional_onnx_export_failed(exc)
     else:
         # extract the neural network for rsl-rl < 4.0.0
         if version.parse(installed_version) >= version.parse("2.3.0"):
@@ -191,7 +214,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
         # export to JIT and ONNX
         export_policy_as_jit(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.pt")
-        export_policy_as_onnx(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx")
+        if args_cli.export_onnx:
+            try:
+                export_policy_as_onnx(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx")
+            except Exception as exc:
+                _warn_optional_onnx_export_failed(exc)
 
     dt = env.unwrapped.step_dt
 

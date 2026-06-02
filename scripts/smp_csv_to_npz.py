@@ -10,6 +10,8 @@ The output matches the SMP G1 prior feature layout:
 from __future__ import annotations
 
 import argparse
+import gc
+import os
 import sys
 from pathlib import Path
 
@@ -35,6 +37,11 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--shard-index", type=int, default=0, help="Shard index for parallel conversion.")
     parser.add_argument("--num-shards", type=int, default=1, help="Total number of shards for parallel conversion.")
+    parser.add_argument(
+        "--graceful-close",
+        action="store_true",
+        help="Try SimulationApp.close() at exit. Useful for debugging Kit shutdown, but it may hang.",
+    )
     AppLauncher.add_app_launcher_args(parser)
     return parser.parse_args()
 
@@ -52,41 +59,11 @@ from isaaclab.scene import InteractiveScene, InteractiveSceneCfg  # noqa: E402
 from isaaclab.utils import configclass  # noqa: E402
 
 from SMP_catchball.robots.g1 import G1_CYLINDER_CFG  # noqa: E402
-from SMP_catchball.smp.feature_to_state import EE_BODY_NAMES, NUM_EE, NUM_JOINTS  # noqa: E402
+from SMP_catchball.smp.feature_to_state import EE_BODY_NAMES, G1_JOINT_NAMES, NUM_EE, NUM_JOINTS  # noqa: E402
 from SMP_catchball.smp.utils import matrix_from_quat, quat_apply_inverse, quat_conjugate, quat_mul, yaw_quat  # noqa: E402
 
 
-JOINT_NAMES: tuple[str, ...] = (
-    "left_hip_pitch_joint",
-    "left_hip_roll_joint",
-    "left_hip_yaw_joint",
-    "left_knee_joint",
-    "left_ankle_pitch_joint",
-    "left_ankle_roll_joint",
-    "right_hip_pitch_joint",
-    "right_hip_roll_joint",
-    "right_hip_yaw_joint",
-    "right_knee_joint",
-    "right_ankle_pitch_joint",
-    "right_ankle_roll_joint",
-    "waist_yaw_joint",
-    "waist_roll_joint",
-    "waist_pitch_joint",
-    "left_shoulder_pitch_joint",
-    "left_shoulder_roll_joint",
-    "left_shoulder_yaw_joint",
-    "left_elbow_joint",
-    "left_wrist_roll_joint",
-    "left_wrist_pitch_joint",
-    "left_wrist_yaw_joint",
-    "right_shoulder_pitch_joint",
-    "right_shoulder_roll_joint",
-    "right_shoulder_yaw_joint",
-    "right_elbow_joint",
-    "right_wrist_roll_joint",
-    "right_wrist_pitch_joint",
-    "right_wrist_yaw_joint",
-)
+JOINT_NAMES: tuple[str, ...] = G1_JOINT_NAMES
 
 
 @configclass
@@ -207,6 +184,60 @@ def _setup_scene(device: str, dt: float) -> tuple[sim_utils.SimulationContext, I
     sim.reset()
     scene.update(dt)
     return sim, scene
+
+
+def _shutdown_scene(sim: sim_utils.SimulationContext, scene: InteractiveScene, graceful_close: bool) -> None:
+    """Release IsaacLab objects before closing Kit.
+
+    EN:
+    Conversion scripts do not have an env wrapper, so we mirror the important
+    parts of IsaacLab env cleanup. On some Isaac Sim/Kit versions even
+    ``SimulationApp.close(skip_cleanup=True)`` can hang, so the default path
+    exits the one-shot conversion process directly after all files are flushed.
+    Pass ``--graceful-close`` only when debugging Kit shutdown itself.
+
+    中文：
+    这个转换脚本没有 IsaacLab env wrapper 帮我们释放资源，所以这里手动执行
+    env.close() 中最关键的清理步骤。某些 Isaac Sim/Kit 版本里，即使用
+    ``SimulationApp.close(skip_cleanup=True)`` 也可能卡住；因此默认路径会在
+    文件全部写盘后直接以成功状态退出一次性转换进程。只有排查 Kit 关闭问题时
+    才传入 ``--graceful-close``。
+    """
+    print("Conversion complete. Releasing IsaacLab scene...", flush=True)
+    try:
+        # EN: Drop scene references before clearing the SimulationContext.
+        # 中文：先释放 scene 引用，再清理 SimulationContext。
+        del scene
+    except Exception:
+        pass
+    try:
+        # EN: Stop timeline/physics before callbacks and singleton cleanup.
+        # 中文：先停止 timeline/physics，再清理回调和单例。
+        sim.stop()
+    except Exception:
+        pass
+    try:
+        sim.clear_all_callbacks()
+    except Exception:
+        pass
+    try:
+        sim.clear_instance()
+    except Exception:
+        pass
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    if graceful_close:
+        # EN: No replicator work is used here; skip full Kit cleanup when requested.
+        # 中文：本脚本不使用 replicator；显式请求时尝试快速关闭 Kit。
+        simulation_app.close(wait_for_replicator=False, skip_cleanup=True)
+        return
+
+    print("IsaacLab scene released. Exiting without Kit graceful shutdown.", flush=True)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 @torch.no_grad()
@@ -336,6 +367,8 @@ def main() -> None:
     print(f"Output: {output_dir}")
     print(f"FPS: {args_cli.input_fps} -> {args_cli.output_fps}; window={args_cli.window_size}; stride={args_cli.stride}")
     print(f"Joints: {len(joint_ids)} | End-effectors: {tuple(EE_BODY_NAMES)}")
+    print(f"Joint order: CSV/NPZ columns are interpreted as {JOINT_NAMES}")
+    print(f"Joint mapping: IsaacLab runtime ids for that order are {joint_ids.detach().cpu().tolist()}")
 
     feature_dims = np.array([3, 6, NUM_JOINTS, NUM_EE * 3, 3, 3], dtype=np.int32)
     for index, csv_path in enumerate(csv_files):
@@ -385,7 +418,7 @@ def main() -> None:
         )
         print(f"  saved {out_path.name}: windows={tuple(windows.shape)}")
 
-    simulation_app.close()
+    _shutdown_scene(sim, scene, args_cli.graceful_close)
 
 
 if __name__ == "__main__":

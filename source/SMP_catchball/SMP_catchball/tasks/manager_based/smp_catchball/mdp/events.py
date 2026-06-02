@@ -2,18 +2,36 @@ from __future__ import annotations
 
 import torch
 
-from SMP_catchball.smp.feature_to_state import EE_BODY_NAMES, NUM_EE, NUM_JOINTS, rot6d_to_quat, slice_features
+from SMP_catchball.smp.feature_to_state import (
+    EE_BODY_NAMES,
+    G1_JOINT_NAMES,
+    NUM_EE,
+    NUM_JOINTS,
+    rot6d_to_quat,
+    slice_features,
+)
 from SMP_catchball.smp.utils import DiffNormalizer, MotionFeatureBuffer, load_denoiser, quat_apply, quat_mul, yaw_quat
 
 
 def init_smp_state(
     env,
-    env_ids: torch.Tensor | None = None,
+    env_ids: torch.Tensor | None,
     ckpt_path: str = "",
     gsi_buffer_size: int = 4096,
     gsi_batch_size: int = 1024,
 ) -> None:
-    """Load the frozen SMP prior, allocate buffers, and pre-sample the GSI pool."""
+    """Load the frozen SMP prior, allocate buffers, and pre-sample the GSI pool.
+
+    EN:
+      IsaacLab EventManager treats the first two positional arguments as
+      ``(env, env_ids)``. Keep ``env_ids`` required, even for startup events
+      where it is passed as None, otherwise parameter validation fails.
+
+    中文：
+      IsaacLab 的 EventManager 会把事件函数前两个位置参数固定识别为
+      ``(env, env_ids)``。即使 startup 事件传入的是 None，``env_ids`` 也
+      不能写默认值，否则 manager 的参数校验会失败。
+    """
     del env_ids
     if not ckpt_path:
         raise RuntimeError("init_smp_state requires a non-empty `ckpt_path`.")
@@ -24,11 +42,15 @@ def init_smp_state(
         raise ValueError(f"SMP prior feature_dim={feature_dim}, expected {expected_dim} for G1.")
 
     robot = env.scene["robot"]
+    joint_ids, joint_names = robot.find_joints(list(G1_JOINT_NAMES), preserve_order=True)
+    if len(joint_ids) != NUM_JOINTS:
+        raise RuntimeError(f"Expected SMP joints {G1_JOINT_NAMES}, but got {joint_names}.")
     body_ids, _ = robot.find_bodies(list(EE_BODY_NAMES), preserve_order=True)
     if len(body_ids) != NUM_EE:
         raise RuntimeError(f"Expected SMP end-effectors {EE_BODY_NAMES}, but got body ids {body_ids}.")
 
     env._smp_bundle = (model, scheduler, q_low, q_high, feature_dim, window_size)
+    env._smp_joint_indexes = torch.tensor(joint_ids, dtype=torch.long, device=env.device)
     env._smp_ee_indexes = torch.tensor(body_ids, dtype=torch.long, device=env.device)
     env._smp_buffer = MotionFeatureBuffer(
         num_envs=env.num_envs,
@@ -46,7 +68,9 @@ def init_smp_state(
             batch_size = min(gsi_batch_size, gsi_buffer_size - start)
             chunks.append(_ddpm_sample(env, batch_size))
         env._smp_gsi_pool = torch.cat(chunks, dim=0)
-        gsi_reset(env)
+        # EN: Prime all environments once after startup sampling.
+        # 中文：startup 采样完成后，先用 GSI 给所有环境初始化一次。
+        gsi_reset(env, None)
 
 
 def _control_dt(env) -> float:
@@ -117,13 +141,22 @@ def _prime_sim_and_buffer(env, env_ids: torch.Tensor, window: torch.Tensor) -> N
         dim=-1,
     )
     robot.write_root_state_to_sim(last_root_state, env_ids=env_ids)
-    robot.write_joint_state_to_sim(joint_pos[:, -1], joint_vel[:, -1], env_ids=env_ids)
+    robot.write_joint_state_to_sim(
+        joint_pos[:, -1],
+        joint_vel[:, -1],
+        joint_ids=env._smp_joint_indexes,
+        env_ids=env_ids,
+    )
     env._smp_buffer.reset(env_ids, pelvis_pos_w, pelvis_quat_w, lin_vel_w, ang_vel_w, ee_pos_w, joint_pos, joint_vel)
 
 
 @torch.no_grad()
-def gsi_reset(env, env_ids: torch.Tensor | None = None) -> None:
-    """Generative State Initialization reset event."""
+def gsi_reset(env, env_ids: torch.Tensor | None) -> None:
+    """Generative State Initialization reset event.
+
+    EN: ``env_ids=None`` means reset all environments.
+    中文：``env_ids=None`` 表示重置全部环境。
+    """
     if not hasattr(env, "_smp_gsi_pool"):
         return
     if env_ids is None:
@@ -138,16 +171,22 @@ def gsi_reset(env, env_ids: torch.Tensor | None = None) -> None:
 @torch.no_grad()
 def gsi_refresh(
     env,
-    env_ids: torch.Tensor | None = None,
+    env_ids: torch.Tensor | None,
     num_samples: int = 1024,
-    step_interval: int = 2400,
 ) -> None:
-    """Periodically refresh part of the GSI sample pool."""
+    """Periodically refresh part of the GSI sample pool.
+
+    EN:
+      IsaacLab does not automatically call arbitrary ``mode="step"`` events.
+      This function is wired as a global ``mode="interval"`` event instead,
+      so each trigger refreshes a chunk of the shared GSI pool.
+
+    中文：
+      IsaacLab 不会自动调用任意 ``mode="step"`` 事件。这里改用全局
+      ``mode="interval"`` 定时事件；每次触发时刷新共享 GSI pool 的一部分。
+    """
     del env_ids
     if not hasattr(env, "_smp_gsi_pool"):
-        return
-    step = int(getattr(env, "common_step_counter", 0))
-    if step == 0 or (step % step_interval) != 0:
         return
     pool = env._smp_gsi_pool
     num_samples = min(num_samples, pool.shape[0])

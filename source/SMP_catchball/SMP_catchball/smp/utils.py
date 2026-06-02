@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib
+import sys
 from typing import Any
 
 import numpy as np
@@ -37,6 +39,34 @@ def seed_everything(seed: int, deterministic: bool = False) -> None:
   if deterministic:
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+
+def _install_numpy_pickle_compat() -> None:
+  """Allow checkpoints pickled with NumPy 2.x to load under NumPy 1.x.
+
+  EN:
+    Some pretrained checkpoints were pickled with NumPy 2.x module names such
+    as ``numpy._core``. Isaac Sim may load a NumPy build where only
+    ``numpy.core`` exists, especially when GUI/headless modes alter sys.path.
+    Registering these aliases keeps torch.load independent of that runtime
+    detail.
+
+  中文：
+    有些预训练 checkpoint 是用 NumPy 2.x 保存的，pickle 里会记录
+    ``numpy._core`` 这类模块名。Isaac Sim 在 GUI/headless 不同模式下可能
+    加载到只提供 ``numpy.core`` 的 NumPy。这里补充模块别名，让 torch.load
+    不受运行时 NumPy 路径差异影响。
+  """
+  if importlib.util.find_spec("numpy._core") is not None:
+    return
+
+  numpy_core = importlib.import_module("numpy.core")
+  sys.modules.setdefault("numpy._core", numpy_core)
+  for name in ("multiarray", "numeric", "fromnumeric", "shape_base", "umath"):
+    try:
+      sys.modules.setdefault(f"numpy._core.{name}", importlib.import_module(f"numpy.core.{name}"))
+    except ModuleNotFoundError:
+      pass
 
 
 def quat_conjugate(q: torch.Tensor) -> torch.Tensor:
@@ -116,6 +146,7 @@ def load_denoiser(
   q_high, feature_dim, window_size)``."""
   device = torch.device(device)
 
+  _install_numpy_pickle_compat()
   ckpt: dict[str, Any] = torch.load(ckpt_path, map_location=device, weights_only=False)
   cfg = ckpt["cfg"]
   feature_dim = int(cfg["feature_dim"])

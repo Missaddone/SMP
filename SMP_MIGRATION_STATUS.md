@@ -360,10 +360,10 @@ windows.shape == (16, 10, 59)
 
 Use the original `smp-master` prior first or a newly trained smoke checkpoint.
 
-Current default checkpoint path in `SmpEnvCfg` is:
+Current default checkpoint path in `SmpEnvCfg` resolves to:
 
 ```text
-D:/OpenSource_Project/smp-master/datasets/pretrain_ckpt/pretrained_loco.pt
+<project-root>/datasets/pretrain_ckpt/pretrained_loco.pt
 ```
 
 If that path does not exist on the runtime machine, change:
@@ -427,4 +427,3 @@ Then test `smp_guidance_reward` alone first.
   - `_data_attr` in rewards/scripts
   - `_heading_w` in commands/rewards
   - `_prime_sim_and_buffer` in events
-

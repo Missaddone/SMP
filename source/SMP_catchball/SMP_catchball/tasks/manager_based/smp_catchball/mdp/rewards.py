@@ -13,6 +13,7 @@ from isaaclab.assets import Articulation
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils.math import wrap_to_pi
 
+from SMP_catchball.smp.feature_to_state import G1_JOINT_NAMES, NUM_JOINTS
 from SMP_catchball.smp.utils import DiffNormalizer, MotionFeatureBuffer
 
 if TYPE_CHECKING:
@@ -40,6 +41,12 @@ def _update_smp_buffer_from_sim(env: ManagerBasedRLEnv) -> None:
     robot: Articulation = env.scene["robot"]
     data = robot.data
     origins = env.scene.env_origins
+    if not hasattr(env, "_smp_joint_indexes"):
+        joint_ids, joint_names = robot.find_joints(list(G1_JOINT_NAMES), preserve_order=True)
+        if len(joint_ids) != NUM_JOINTS:
+            raise RuntimeError(f"Expected SMP joints {G1_JOINT_NAMES}, but got {joint_names}.")
+        env._smp_joint_indexes = torch.tensor(joint_ids, dtype=torch.long, device=env.device)
+    joint_ids = env._smp_joint_indexes
     ee_ids = env._smp_ee_indexes
     buffer: MotionFeatureBuffer = env._smp_buffer
 
@@ -56,8 +63,8 @@ def _update_smp_buffer_from_sim(env: ManagerBasedRLEnv) -> None:
         root_lin_vel_w,
         root_ang_vel_w,
         ee_pos_w,
-        data.joint_pos,
-        data.joint_vel,
+        data.joint_pos[:, joint_ids],
+        data.joint_vel[:, joint_ids],
     )
 
 
@@ -111,6 +118,30 @@ def task_smp_product(
 ) -> torch.Tensor:
     """Multiplicative task reward gated by SMP guidance."""
     task = sum(weight * func(env, **kwargs) for func, weight, kwargs in task_terms)
+    return task * smp_guidance_reward(env, fixed_timesteps=fixed_timesteps, ws=ws)
+
+
+def forward_task_smp_product(
+    env: ManagerBasedRLEnv,
+    command_name: str = "steering",
+    vel_err_scale: float = 0.5,
+    fixed_timesteps: tuple[int, ...] = (8, 15, 22),
+    ws: float = 6.0,
+) -> torch.Tensor:
+    """Forward task reward gated by the frozen SMP guidance reward.
+
+    EN:
+      Hydra/OmegaConf cannot serialize Python function objects in config
+      params. The generic ``task_smp_product`` accepts callables, but training
+      configs need primitive values only; this wrapper keeps Forward trainable
+      through Hydra.
+
+    中文：
+      Hydra/OmegaConf 不能在配置参数里序列化 Python function。通用的
+      ``task_smp_product`` 可以接收 callable，但训练配置必须只包含基础
+      类型；这个 wrapper 让 Forward 任务可以通过 Hydra 正常训练。
+    """
+    task = steering_target_velocity(env, command_name=command_name, vel_err_scale=vel_err_scale)
     return task * smp_guidance_reward(env, fixed_timesteps=fixed_timesteps, ws=ws)
 
 

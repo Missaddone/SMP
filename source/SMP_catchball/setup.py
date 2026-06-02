@@ -8,7 +8,7 @@
 import os
 
 import toml
-from setuptools import setup
+from setuptools import find_packages, setup
 
 # Obtain the extension data from the extension.toml file
 EXTENSION_PATH = os.path.dirname(os.path.realpath(__file__))
@@ -24,7 +24,9 @@ INSTALL_REQUIRES = [
 # Installation operation
 setup(
     name="SMP_catchball",
-    packages=["SMP_catchball"],
+    # EN: Include nested packages such as SMP_catchball.smp/tasks/robots.
+    # 中文：必须包含 smp/tasks/robots 等子包，否则 editable 安装后只能导入顶层包。
+    packages=find_packages(),
     author=EXTENSION_TOML_DATA["package"]["author"],
     maintainer=EXTENSION_TOML_DATA["package"]["maintainer"],
     url=EXTENSION_TOML_DATA["package"]["repository"],
