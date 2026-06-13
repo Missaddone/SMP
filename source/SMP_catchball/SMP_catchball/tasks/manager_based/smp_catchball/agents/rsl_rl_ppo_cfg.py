@@ -38,3 +38,19 @@ class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
         desired_kl=0.01,
         max_grad_norm=1.0,
     )
+
+
+@configclass
+class GetupPPORunnerCfg(PPORunnerCfg):
+    experiment_name = "smp_getup_g1"
+    run_name = "smp_getup_g1"
+
+
+@configclass
+class SteeringPPORunnerCfg(PPORunnerCfg):
+    experiment_name = "jushen_speed_06_30"
+
+
+@configclass
+class SteeringModifiedPPORunnerCfg(PPORunnerCfg):
+    experiment_name = "smp_steering_modified_g1"

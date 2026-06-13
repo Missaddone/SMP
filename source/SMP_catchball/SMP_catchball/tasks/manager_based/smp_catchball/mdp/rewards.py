@@ -11,7 +11,7 @@ import torch
 
 from isaaclab.assets import Articulation
 from isaaclab.managers import SceneEntityCfg
-from isaaclab.utils.math import wrap_to_pi
+from isaaclab.utils.math import quat_apply, wrap_to_pi
 
 from SMP_catchball.smp.feature_to_state import G1_JOINT_NAMES, NUM_JOINTS
 from SMP_catchball.smp.utils import DiffNormalizer, MotionFeatureBuffer
@@ -73,6 +73,7 @@ def smp_guidance_reward(
     fixed_timesteps: tuple[int, ...] = (8, 15, 22),
     ws: float = 4.0,
     normalize: bool = True,
+    env_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Compute the frozen-prior SDS guidance reward for the current G1 motion window."""
     if not hasattr(env, "_smp_bundle"):
@@ -85,8 +86,22 @@ def smp_guidance_reward(
 
     features = buffer.compute_features()
     x_0 = 2.0 * (features - q_low) / (q_high - q_low + 1e-8) - 1.0
-    num_envs = x_0.shape[0]
+    all_num_envs = x_0.shape[0]
     device = x_0.device
+    if env_mask is not None:
+        env_mask = env_mask.to(device=device, dtype=torch.bool)
+        if env_mask.numel() != all_num_envs:
+            raise ValueError(f"env_mask length {env_mask.numel()} does not match num_envs {all_num_envs}.")
+        if not env_mask.any():
+            env._smp_raw_err = torch.zeros(all_num_envs, device=device)
+            return torch.ones(all_num_envs, device=device)
+        active_mask = env_mask
+        x_0_active = x_0[active_mask]
+    else:
+        active_mask = None
+        x_0_active = x_0
+
+    num_envs = x_0_active.shape[0]
 
     total_err = torch.zeros(num_envs, device=device)
     total_raw = torch.zeros(num_envs, device=device)
@@ -95,8 +110,8 @@ def smp_guidance_reward(
             if not 0 <= t_scalar < scheduler.num_timesteps:
                 raise ValueError(f"fixed_timestep {t_scalar} out of range [0, {scheduler.num_timesteps})")
             t = torch.full((num_envs,), t_scalar, dtype=torch.long, device=device)
-            noise = torch.randn_like(x_0)
-            x_t = scheduler.add_noise(x_0, noise, t)
+            noise = torch.randn_like(x_0_active)
+            x_t = scheduler.add_noise(x_0_active, noise, t)
             eps_hat = model(x_t, t)
             mse_per_env = ((eps_hat - noise) ** 2).mean(dim=(-1, -2))
             total_raw += mse_per_env
@@ -105,9 +120,18 @@ def smp_guidance_reward(
             else:
                 total_err += mse_per_env
 
-    env._smp_raw_err = total_raw / len(fixed_timesteps)
+    if active_mask is None:
+        env._smp_raw_err = total_raw / len(fixed_timesteps)
+    else:
+        env._smp_raw_err = torch.zeros(all_num_envs, device=device)
+        env._smp_raw_err[active_mask] = total_raw / len(fixed_timesteps)
     err = total_err / len(fixed_timesteps)
-    return torch.exp(-err * ws)
+    reward = torch.exp(-err * ws)
+    if active_mask is None:
+        return reward
+    full_reward = torch.ones(all_num_envs, device=device)
+    full_reward[active_mask] = reward
+    return full_reward
 
 
 def task_smp_product(
@@ -119,6 +143,53 @@ def task_smp_product(
     """Multiplicative task reward gated by SMP guidance."""
     task = sum(weight * func(env, **kwargs) for func, weight, kwargs in task_terms)
     return task * smp_guidance_reward(env, fixed_timesteps=fixed_timesteps, ws=ws)
+
+
+def _command_moving_mask(env: ManagerBasedRLEnv, command_name: str) -> torch.Tensor:
+    """Return True for envs whose effective reference speed is outside the deadzone."""
+    command = env.command_manager.get_term(command_name)
+    speed_deadzone = getattr(command.cfg, "speed_deadzone", 0.0)
+    return command.tar_speed >= speed_deadzone
+
+
+def _root_ang_vel_w(data) -> torch.Tensor:
+    return data.root_link_ang_vel_w if hasattr(data, "root_link_ang_vel_w") else data.root_ang_vel_w
+
+
+def standing_still_reward(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    joint_std: float = 0.15,
+    lin_vel_scale: float = 2.0,
+    ang_vel_scale: float = 0.5,
+    action_scale: float = 0.1,
+) -> torch.Tensor:
+    """Reward quiet upright standing without using the SMP motion prior.
+
+    EN: Use an additive blend instead of multiplying all terms. This keeps a
+    usable learning signal when GSI starts an env from a moving pose.
+    中文：这里不用各项相乘，而是加权求和。这样即使 GSI 把环境初始化到运动
+    姿态，站立分支也不会因为某一项接近 0 而完全没梯度信号。
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    data = asset.data
+    if not hasattr(env, "_smp_joint_indexes"):
+        joint_ids, joint_names = asset.find_joints(list(G1_JOINT_NAMES), preserve_order=True)
+        if len(joint_ids) != NUM_JOINTS:
+            raise RuntimeError(f"Expected SMP joints {G1_JOINT_NAMES}, but got {joint_names}.")
+        env._smp_joint_indexes = torch.tensor(joint_ids, dtype=torch.long, device=env.device)
+    joint_ids = env._smp_joint_indexes
+
+    root_lin_vel_xy = _root_lin_vel_w(data)[:, :2]
+    root_ang_vel = _root_ang_vel_w(data)
+    joint_err = data.joint_pos[:, joint_ids] - data.default_joint_pos[:, joint_ids]
+    pose = torch.exp(-torch.mean((joint_err / joint_std) ** 2, dim=-1))
+    lin_quiet = torch.exp(-lin_vel_scale * torch.sum(root_lin_vel_xy**2, dim=-1))
+    ang_quiet = torch.exp(-ang_vel_scale * torch.sum(root_ang_vel**2, dim=-1))
+    upright = (-data.projected_gravity_b[:, 2]).clamp(0.0, 1.0)
+    action = env.action_manager.action
+    action_regularization = torch.exp(-action_scale * torch.mean(action**2, dim=-1))
+    return 0.30 * lin_quiet + 0.20 * ang_quiet + 0.25 * upright + 0.15 * pose + 0.10 * action_regularization
 
 
 def forward_task_smp_product(
@@ -145,6 +216,150 @@ def forward_task_smp_product(
     return task * smp_guidance_reward(env, fixed_timesteps=fixed_timesteps, ws=ws)
 
 
+def steering_task_smp_product(
+    env: ManagerBasedRLEnv,
+    command_name: str = "steering",
+    vel_err_scale: float = 1.0,
+    velocity_weight: float = 1.5,
+    face_weight: float = 0.5,
+    fixed_timesteps: tuple[int, ...] = (8, 15, 22),
+    ws: float = 6.0,
+) -> torch.Tensor:
+    """Steering task reward gated by SMP guidance.
+
+    EN: Matches the original SMP steering task: velocity tracking and facing
+    direction alignment are blended before being multiplied by the SMP prior.
+    中文：对齐原 SMP steering 任务：速度跟踪和朝向对齐先加权融合，再乘以
+    SMP prior 风格项。
+    """
+    velocity = steering_target_velocity(env, command_name=command_name, vel_err_scale=vel_err_scale)
+    face = steering_face_direction(env, command_name=command_name)
+    # print("velocity reward:", velocity)
+    # print("face reward:", face)
+    task = velocity_weight * velocity + face_weight * face
+    style = smp_guidance_reward(env, fixed_timesteps=fixed_timesteps, ws=ws)
+    # print("task reward:", task)
+    # print("style reward:", style)
+    return task * style
+
+
+def steering_modified_task_smp_product(
+    env: ManagerBasedRLEnv,
+    command_name: str = "steering",
+    vel_err_scale: float = 1.0,
+    velocity_weight: float = 1.0,
+    face_weight: float = 0.5,
+    deadzone_stand_weight: float = 0.5,
+    deadzone_lin_vel_penalty_weight: float = 2.0,
+    deadzone_joint_vel_penalty_weight: float = 0.05,
+    deadzone_action_penalty_weight: float = 0.05,
+    fixed_timesteps: tuple[int, ...] = (8, 15, 22),
+    ws: float = 6.0,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Steering reward with extra quiet-standing constraints in the deadzone.
+
+    EN: The base task is always ``velocity_weight * velocity + face_weight *
+    face``. For commands inside ``speed_deadzone`` we add a standing bonus and
+    subtract stronger penalties for root xy velocity, joint velocity and action.
+    The final layout is still ``task * style``.
+
+    中文：基础 task 始终保持 ``velocity_weight * velocity + face_weight *
+    face`` 不变。只有命令落在 ``speed_deadzone`` 内时，额外加入站立奖励，并
+    对 root 水平线速度、关节速度和 action 加更强惩罚。最终结构仍然是
+    ``task * style``。
+    """
+    moving_mask = _command_moving_mask(env, command_name)
+    velocity = steering_target_velocity(env, command_name=command_name, vel_err_scale=vel_err_scale)
+    face = steering_face_direction(env, command_name=command_name)
+    task = velocity_weight * velocity + face_weight * face
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    if not hasattr(env, "_smp_joint_indexes"):
+        joint_ids, joint_names = asset.find_joints(list(G1_JOINT_NAMES), preserve_order=True)
+        if len(joint_ids) != NUM_JOINTS:
+            raise RuntimeError(f"Expected SMP joints {G1_JOINT_NAMES}, but got {joint_names}.")
+        env._smp_joint_indexes = torch.tensor(joint_ids, dtype=torch.long, device=env.device)
+    joint_ids = env._smp_joint_indexes
+
+    root_vel_xy = _root_lin_vel_w(asset.data)[:, :2]
+    root_speed_sq = torch.sum(root_vel_xy**2, dim=-1)
+    joint_vel_sq = torch.mean(asset.data.joint_vel[:, joint_ids] ** 2, dim=-1)
+    action_sq = torch.mean(env.action_manager.action**2, dim=-1)
+    deadzone_extra = deadzone_stand_weight * standing_still_reward(env)
+    deadzone_extra = deadzone_extra - deadzone_lin_vel_penalty_weight * root_speed_sq
+    deadzone_extra = deadzone_extra - deadzone_joint_vel_penalty_weight * joint_vel_sq
+    deadzone_extra = deadzone_extra - deadzone_action_penalty_weight * action_sq
+
+    task = torch.where(moving_mask, task, torch.clamp(task + deadzone_extra, min=0.0))
+    return task * smp_guidance_reward(env, fixed_timesteps=fixed_timesteps, ws=ws)
+
+
+def _virtual_head_state(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names="torso_link"),
+    head_pos_in_torso: tuple[float, float, float] = (0.0, 0.0, 0.43),
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return world position and velocity of the getup task's virtual head site."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    if not hasattr(env, "_getup_head_body_indexes"):
+        body_ids, body_names = asset.find_bodies(asset_cfg.body_names, preserve_order=True)
+        if len(body_ids) != 1:
+            raise RuntimeError(f"Expected exactly one getup head parent body, got {body_names}.")
+        env._getup_head_body_indexes = torch.tensor(body_ids, dtype=torch.long, device=env.device)
+
+    body_id = env._getup_head_body_indexes
+    body_pos = _data_attr(asset.data, "body_link_pos_w", "body_pos_w")[:, body_id].squeeze(1)
+    body_quat = _data_attr(asset.data, "body_link_quat_w", "body_quat_w")[:, body_id].squeeze(1)
+    body_lin_vel = _data_attr(asset.data, "body_link_lin_vel_w", "body_lin_vel_w")[:, body_id].squeeze(1)
+    body_ang_vel = _data_attr(asset.data, "body_link_ang_vel_w", "body_ang_vel_w")[:, body_id].squeeze(1)
+
+    offset_b = torch.tensor(head_pos_in_torso, dtype=body_pos.dtype, device=body_pos.device).expand_as(body_pos)
+    offset_w = quat_apply(body_quat, offset_b)
+    head_pos = body_pos + offset_w
+    head_vel = body_lin_vel + torch.cross(body_ang_vel, offset_w, dim=-1)
+    return head_pos, head_vel
+
+
+def track_head_height(
+    env: ManagerBasedRLEnv,
+    target_height: float = 1.2,
+    scale: float = 6.0,
+) -> torch.Tensor:
+    """Reward the virtual head reaching target height, with no overshoot penalty."""
+    head_pos, _ = _virtual_head_state(env)
+    shortfall = torch.clamp(head_pos[:, 2] - target_height, max=0.0)
+    return torch.exp(-scale * shortfall * shortfall)
+
+
+def upward_velocity(
+    env: ManagerBasedRLEnv,
+    target_velocity: float = 0.25,
+    head_height_threshold: float = 0.6,
+    scale: float = 100.0,
+) -> torch.Tensor:
+    """Reward upward virtual-head velocity until the head has reached a useful height."""
+    head_pos, head_vel = _virtual_head_state(env)
+    shortfall = torch.clamp(head_vel[:, 2] - target_velocity, max=0.0)
+    shaped = torch.exp(-scale * shortfall * shortfall)
+    return torch.where(head_pos[:, 2] < head_height_threshold, shaped, torch.ones_like(shaped))
+
+
+def getup_task_smp_product(
+    env: ManagerBasedRLEnv,
+    fixed_timesteps: tuple[int, ...] = (8, 15, 22),
+    ws: float = 6.0,
+) -> torch.Tensor:
+    """Getup task reward gated by the frozen SMP guidance reward."""
+    task = 0.7 * upward_velocity(
+        env,
+        target_velocity=0.25,
+        head_height_threshold=0.9,
+        scale=100.0,
+    ) + 0.3 * track_head_height(env, target_height=1.1, scale=1.0)
+    return task * smp_guidance_reward(env, fixed_timesteps=fixed_timesteps, ws=ws)
+
+
 def _root_lin_vel_w(data) -> torch.Tensor:
     return data.root_link_lin_vel_w if hasattr(data, "root_link_lin_vel_w") else data.root_lin_vel_w
 
@@ -167,7 +382,15 @@ def steering_target_velocity(
     asset: Articulation = env.scene[asset_cfg.name]
     command = env.command_manager.get_term(command_name)
     root_vel_xy = _root_lin_vel_w(asset.data)[:, :2]
-    tar_vel = command.tar_speed.unsqueeze(-1) * command.tar_dir_w
+    speed_deadzone = getattr(command.cfg, "speed_deadzone", 0.0)
+    # print("target_speed:", command.tar_speed)
+    # print("root_speed:", torch.linalg.norm(root_vel_xy, dim=-1))
+    tar_speed = torch.where(
+        command.tar_speed < speed_deadzone,
+        torch.zeros_like(command.tar_speed),
+        command.tar_speed,
+    )
+    tar_vel = tar_speed.unsqueeze(-1) * command.tar_dir_w
     vel_err = ((tar_vel - root_vel_xy) ** 2).sum(dim=-1)
     proj_speed = (command.tar_dir_w * root_vel_xy).sum(dim=-1)
     reward = torch.exp(-vel_err_scale * vel_err)

@@ -111,6 +111,24 @@ torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
 
 
+def _freeze_policy_std(runner) -> None:
+    """Keep Gaussian exploration std fixed, matching the original SMP learn_std=False setup."""
+    actor = getattr(getattr(runner, "alg", None), "actor", None)
+    if actor is None:
+        return
+
+    frozen = []
+    for module_name, module in actor.named_modules():
+        for param_name in ("std_param", "log_std_param"):
+            param = getattr(module, param_name, None)
+            if param is not None:
+                param.requires_grad_(False)
+                frozen.append(f"{module_name}.{param_name}" if module_name else param_name)
+
+    if frozen:
+        print(f"[INFO] Fixed policy exploration std: {frozen}")
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Train with RSL-RL agent."""
@@ -211,6 +229,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
         # load previously trained model
         runner.load(resume_path)
+    if agent_cfg.class_name == "OnPolicyRunner":
+        _freeze_policy_std(runner)
 
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)

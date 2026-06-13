@@ -72,7 +72,7 @@ class SmpCatchballSceneCfg(InteractiveSceneCfg):
 class ActionsCfg:
     """Action specifications for the MDP."""
 
-    joint_pos = mdp.JointPositionActionCfg(
+    joint_pos = mdp.BiasedJointPositionActionCfg(
         asset_name="robot",
         joint_names=G1_JOINT_NAMES_LIST,
         preserve_order=True,
@@ -174,6 +174,14 @@ class EventCfg:
             "com_range": {"x": (-0.025, 0.025), "y": (-0.025, 0.025), "z": (-0.03, 0.03)},
         },
     )
+    encoder_bias = EventTerm(
+        func=mdp.randomize_encoder_bias,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=G1_JOINT_NAMES_LIST, preserve_order=True),
+            "bias_range": (-0.015, 0.015),
+        },
+    )
     init_smp_state = EventTerm(
         func=mdp.init_smp_state,
         mode="startup",
@@ -181,6 +189,7 @@ class EventCfg:
             # EN: Forward task uses the locomotion prior by default.
             # 中文：Forward 任务默认使用 locomotion 预训练 prior。
             "ckpt_path": str(PRETRAIN_CKPT_DIR / "pretrained_loco.pt"),
+            # "ckpt_path": str(PRETRAIN_CKPT_DIR / "checkpoint_01999.pt"),
             "gsi_buffer_size": 4096,
             "gsi_batch_size": 1024,
         },
@@ -290,8 +299,39 @@ class ForwardCommandsCfg(CommandsCfg):
         resampling_time_range=(3.0, 8.0),
         rand_tar_dir=False,
         rand_face_dir=False,
-        tar_speed_min=0.5,
+        tar_speed_min=0.0,
         tar_speed_max=5.0,
+        speed_deadzone=0.5,
+    )
+
+
+@configclass
+class SteeringCommandsCfg(CommandsCfg):
+    """Random directional running command configuration."""
+
+    steering: CmdTerm = mdp.SteeringCommandCfg(
+        asset_name="robot",
+        resampling_time_range=(3.0, 8.0),
+        rand_tar_dir=True,
+        rand_face_dir=False,
+        tar_speed_min=0.6,
+        tar_speed_max=3.0,
+        speed_deadzone=0.5,
+    )
+
+
+@configclass
+class SteeringModifiedCommandsCfg(CommandsCfg):
+    """Random steering commands with low-speed samples reserved for standing."""
+
+    steering: CmdTerm = mdp.SteeringCommandCfg(
+        asset_name="robot",
+        resampling_time_range=(3.0, 8.0),
+        rand_tar_dir=True,
+        rand_face_dir=False,
+        tar_speed_min=0.0,
+        tar_speed_max=3.0,
+        speed_deadzone=0.5,
     )
 
 
@@ -327,14 +367,101 @@ class ForwardRewardsCfg(RewardsCfg):
 
 
 @configclass
+class SteeringRewardsCfg(RewardsCfg):
+    alive = None
+    terminating = None
+    smp = None
+    task_smp_product = RewTerm(
+        func=mdp.steering_task_smp_product,
+        weight=1.0,
+        params={
+            "command_name": "steering",
+            "vel_err_scale": 1.0,
+            "velocity_weight": 0.5,
+            "face_weight": 0.5,
+            "fixed_timesteps": (8, 15, 22),
+            "ws": 6.0,
+        },
+    )
+
+
+@configclass
+class SteeringModifiedRewardsCfg(RewardsCfg):
+    alive = None
+    terminating = None
+    smp = None
+    task_smp_product = RewTerm(
+        func=mdp.steering_modified_task_smp_product,
+        weight=1.0,
+        params={
+            "command_name": "steering",
+            "vel_err_scale": 1.0,
+            "velocity_weight": 1.0,
+            "face_weight": 0.5,
+            "deadzone_stand_weight": 0.5,
+            "deadzone_lin_vel_penalty_weight": 2.0,
+            "deadzone_joint_vel_penalty_weight": 0.05,
+            "deadzone_action_penalty_weight": 0.05,
+            "fixed_timesteps": (8, 15, 22),
+            "ws": 6.0,
+        },
+    )
+
+
+@configclass
 class ForwardTerminationsCfg(TerminationsCfg):
-    # EN: Disable trunk/base contact termination for Forward to isolate the
-    # locomotion convergence issue against the original SMP setup.
-    # 中文：Forward 任务先关闭躯干/根部接触终止，用来排除迁移后该项过早终止对收敛的影响。
-    base_contact = None
     base_too_low = DoneTerm(
         func=mdp.root_height_below_minimum,
         params={"minimum_height": 0.3, "asset_cfg": SceneEntityCfg("robot")},
+    )
+
+
+@configclass
+class GetupEventCfg(EventCfg):
+    """Events for the SMP getup task."""
+
+    init_smp_state = EventTerm(
+        func=mdp.init_smp_state,
+        mode="startup",
+        params={
+            "ckpt_path": str(PRETRAIN_CKPT_DIR / "pretrained_getup_f2s2.pt"),
+            "gsi_buffer_size": 4096,
+            "gsi_batch_size": 1024,
+        },
+    )
+    reset_stand_counter = EventTerm(func=mdp.reset_stand_counter, mode="reset")
+
+
+@configclass
+class GetupRewardsCfg(RewardsCfg):
+    """Reward terms for the SMP getup task."""
+
+    alive = None
+    terminating = None
+    smp = None
+    task_smp_product = RewTerm(
+        func=mdp.getup_task_smp_product,
+        weight=1.0,
+        params={
+            "fixed_timesteps": (8, 15, 22),
+            "ws": 6.0,
+        },
+    )
+
+
+@configclass
+class GetupTerminationsCfg(TerminationsCfg):
+    """Termination terms for the SMP getup task."""
+
+    base_contact = None
+    smp_too_low = DoneTerm(
+        func=mdp.smp_too_low,
+        params={"threshold": 0.02, "ws": 6.0, "grace_steps": 5},
+    )
+    stood_up = DoneTerm(
+        func=mdp.stood_up,
+        time_out=True,
+        params={"head_height": 1.2, "max_speed": 0.5, "hold_steps": 25},
     )
 
 
@@ -346,3 +473,49 @@ class SmpG1ForwardEnvCfg(SmpEnvCfg):
     observations: ForwardObservationsCfg = ForwardObservationsCfg()
     rewards: ForwardRewardsCfg = ForwardRewardsCfg()
     terminations: ForwardTerminationsCfg = ForwardTerminationsCfg()
+
+
+@configclass
+class SteeringEventCfg(EventCfg):
+    """Events for the random steering task."""
+
+    init_smp_state = EventTerm(
+        func=mdp.init_smp_state,
+        mode="startup",
+        params={
+            "ckpt_path": str(PRETRAIN_CKPT_DIR / "pretrained_jushen.pt"),
+            # "ckpt_path": str(PRETRAIN_CKPT_DIR / "pretrained_lafan_run.pt"),
+            "gsi_buffer_size": 4096,
+            "gsi_batch_size": 1024,
+        },
+    )
+
+
+@configclass
+class SmpG1SteeringEnvCfg(SmpG1ForwardEnvCfg):
+    """G1 random steering task with SMP guidance."""
+
+    commands: SteeringCommandsCfg = SteeringCommandsCfg()
+    events: SteeringEventCfg = SteeringEventCfg()
+    rewards: SteeringRewardsCfg = SteeringRewardsCfg()
+
+
+@configclass
+class SmpG1SteeringModifiedEnvCfg(SmpG1SteeringEnvCfg):
+    """Random steering task with a standing branch in the command deadzone."""
+
+    commands: SteeringModifiedCommandsCfg = SteeringModifiedCommandsCfg()
+    rewards: SteeringModifiedRewardsCfg = SteeringModifiedRewardsCfg()
+
+
+@configclass
+class SmpG1GetupEnvCfg(SmpEnvCfg):
+    """G1 getup task with SMP guidance."""
+
+    events: GetupEventCfg = GetupEventCfg()
+    rewards: GetupRewardsCfg = GetupRewardsCfg()
+    terminations: GetupTerminationsCfg = GetupTerminationsCfg()
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.episode_length_s = 5.0

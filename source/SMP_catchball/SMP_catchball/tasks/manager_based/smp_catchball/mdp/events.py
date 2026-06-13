@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import torch
 
+from isaaclab.managers import SceneEntityCfg
+
 from SMP_catchball.smp.feature_to_state import (
     EE_BODY_NAMES,
     G1_JOINT_NAMES,
@@ -11,6 +13,43 @@ from SMP_catchball.smp.feature_to_state import (
     slice_features,
 )
 from SMP_catchball.smp.utils import DiffNormalizer, MotionFeatureBuffer, load_denoiser, quat_apply, quat_mul, yaw_quat
+
+
+@torch.no_grad()
+def randomize_encoder_bias(
+    env,
+    env_ids: torch.Tensor | None,
+    bias_range: tuple[float, float] = (-0.015, 0.015),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> None:
+    """Randomize per-joint encoder bias, matching the original SMP domain randomization.
+
+    EN: The bias is stored on the environment and consumed by the local
+    observation/action terms. The simulator joint state itself is left unchanged.
+    中文：偏置保存在环境对象上，由本地 observation/action term 使用；仿真里的
+    真实关节状态本身不被修改。
+    """
+    robot = env.scene[asset_cfg.name]
+    if not hasattr(env, "_smp_encoder_bias"):
+        env._smp_encoder_bias = torch.zeros(env.num_envs, robot.num_joints, device=env.device)
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
+    else:
+        env_ids = env_ids.to(device=env.device, dtype=torch.long)
+    if env_ids.numel() == 0:
+        return
+
+    joint_ids = asset_cfg.joint_ids
+    low, high = bias_range
+    if isinstance(joint_ids, slice):
+        num_joints = env._smp_encoder_bias[:, joint_ids].shape[1]
+        env._smp_encoder_bias[env_ids, joint_ids] = torch.empty(
+            env_ids.numel(), num_joints, device=env.device
+        ).uniform_(low, high)
+    else:
+        joint_ids_tensor = torch.as_tensor(joint_ids, dtype=torch.long, device=env.device)
+        samples = torch.empty(env_ids.numel(), joint_ids_tensor.numel(), device=env.device).uniform_(low, high)
+        env._smp_encoder_bias[env_ids[:, None], joint_ids_tensor[None, :]] = samples
 
 
 def init_smp_state(
@@ -200,3 +239,13 @@ def gsi_refresh(
         pool[head:] = new_windows[:first]
         pool[: end - pool.shape[0]] = new_windows[first:]
     env._smp_gsi_head = end % pool.shape[0]
+
+
+@torch.no_grad()
+def reset_stand_counter(env, env_ids: torch.Tensor | None) -> None:
+    """Reset the getup success hold counter for selected environments."""
+    if not hasattr(env, "_getup_stand_count"):
+        return
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    env._getup_stand_count[env_ids] = 0

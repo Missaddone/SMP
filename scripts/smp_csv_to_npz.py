@@ -60,7 +60,8 @@ from isaaclab.utils import configclass  # noqa: E402
 
 from SMP_catchball.robots.g1 import G1_CYLINDER_CFG  # noqa: E402
 from SMP_catchball.smp.feature_to_state import EE_BODY_NAMES, G1_JOINT_NAMES, NUM_EE, NUM_JOINTS  # noqa: E402
-from SMP_catchball.smp.utils import matrix_from_quat, quat_apply_inverse, quat_conjugate, quat_mul, yaw_quat  # noqa: E402
+from SMP_catchball.smp.utils import quat_conjugate, quat_mul  # noqa: E402
+from SMP_catchball.smp.utils import MotionFeatureBuffer  # noqa: E402
 
 
 JOINT_NAMES: tuple[str, ...] = G1_JOINT_NAMES
@@ -80,7 +81,18 @@ class G1SceneCfg(InteractiveSceneCfg):
 
 
 def _load_csv(path: Path, quat_order: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    arr = np.loadtxt(path, delimiter=",", dtype=np.float32)
+    try:
+        arr = np.loadtxt(path, delimiter=",", dtype=np.float32)
+    except ValueError:
+        # EN: Some retargeting exports include a CSV header such as
+        # ``root_PosX,root_PosY,...``. Fall back to genfromtxt with names so the
+        # numeric rows are parsed while the header is skipped.
+        # 中文：部分动捕/重定向导出的 CSV 带表头，例如 ``root_PosX``。这里回退到
+        # genfromtxt(names=True)，跳过表头并读取数值数据。
+        named = np.genfromtxt(path, delimiter=",", names=True, dtype=np.float32)
+        if named.dtype.names is None:
+            raise
+        arr = np.column_stack([named[name] for name in named.dtype.names]).astype(np.float32)
     if arr.ndim == 1:
         arr = arr[None]
     if arr.shape[1] != 7 + NUM_JOINTS:
@@ -121,7 +133,9 @@ def _resample_motion(
 
     num_frames = root_pos.shape[0]
     duration = (num_frames - 1) / input_fps
-    times = torch.arange(0.0, duration + 1e-6, 1.0 / output_fps, dtype=torch.float32)
+    # EN: Match mjlab MotionLoader exactly: do not include the final timestamp.
+    # 中文：和原工程 mjlab MotionLoader 对齐：重采样不包含最后一个时间端点。
+    times = torch.arange(0.0, duration, 1.0 / output_fps, dtype=torch.float32)
     src = (times * input_fps).clamp(max=num_frames - 1)
     idx0 = torch.floor(src).long()
     idx1 = torch.clamp(idx0 + 1, max=num_frames - 1)
@@ -153,19 +167,31 @@ def _finite_difference_velocities(
     joint_pos: torch.Tensor,
     dt: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    root_lin_vel = torch.zeros_like(root_pos)
-    root_ang_vel = torch.zeros_like(root_pos)
-    joint_vel = torch.zeros_like(joint_pos)
     if root_pos.shape[0] <= 1:
+        root_lin_vel = torch.zeros_like(root_pos)
+        root_ang_vel = torch.zeros_like(root_pos)
+        joint_vel = torch.zeros_like(joint_pos)
         return root_lin_vel, root_ang_vel, joint_vel
 
-    root_lin_vel[:-1] = (root_pos[1:] - root_pos[:-1]) / dt
-    root_lin_vel[-1] = root_lin_vel[-2]
-    dq = _quat_diff(root_quat[:-1], root_quat[1:])
-    root_ang_vel[:-1] = _quat_to_rotvec(dq) / dt
-    root_ang_vel[-1] = root_ang_vel[-2]
-    joint_vel[:-1] = (joint_pos[1:] - joint_pos[:-1]) / dt
-    joint_vel[-1] = joint_vel[-2]
+    # EN: Match mjlab MotionLoader: torch.gradient for linear/dof velocities.
+    # 中文：和原工程 MotionLoader 一致：线速度和关节速度使用 torch.gradient。
+    root_lin_vel = torch.gradient(root_pos, spacing=dt, dim=0)[0]
+    joint_vel = torch.gradient(joint_pos, spacing=dt, dim=0)[0]
+
+    if root_pos.shape[0] <= 2:
+        dq = _quat_diff(root_quat[:-1], root_quat[1:])
+        root_ang_vel = torch.zeros_like(root_pos)
+        root_ang_vel[:-1] = _quat_to_rotvec(dq) / dt
+        root_ang_vel[-1] = root_ang_vel[-2]
+        return root_lin_vel, root_ang_vel, joint_vel
+
+    # EN: Match mjlab MotionLoader SO(3) derivative: q[t+1] * conj(q[t-1]) / (2dt),
+    # then repeat the first/last interior samples at the boundaries.
+    # 中文：和原工程 SO(3) 角速度计算一致：用前后两帧四元数做中心差分，
+    # 边界处重复首尾内部样本。
+    q_rel = quat_mul(root_quat[2:], quat_conjugate(root_quat[:-2]))
+    omega_mid = _quat_to_rotvec(q_rel) / (2.0 * dt)
+    root_ang_vel = torch.cat([omega_mid[:1], omega_mid, omega_mid[-1:]], dim=0)
     return root_lin_vel, root_ang_vel, joint_vel
 
 
@@ -241,7 +267,7 @@ def _shutdown_scene(sim: sim_utils.SimulationContext, scene: InteractiveScene, g
 
 
 @torch.no_grad()
-def _compute_ee_positions(
+def _replay_motion_kinematics(
     sim: sim_utils.SimulationContext,
     scene: InteractiveScene,
     root_pos: torch.Tensor,
@@ -253,7 +279,7 @@ def _compute_ee_positions(
     joint_ids: torch.Tensor,
     ee_ids: torch.Tensor,
     dt: float,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     robot = scene["robot"]
     device = robot.device
     root_pos = root_pos.to(device)
@@ -263,7 +289,14 @@ def _compute_ee_positions(
     joint_pos = joint_pos.to(device)
     joint_vel = joint_vel.to(device)
 
-    ee_pos = []
+    root_pos_out = []
+    root_quat_out = []
+    root_lin_vel_out = []
+    root_ang_vel_out = []
+    ee_pos_out = []
+    joint_pos_out = []
+    joint_vel_out = []
+    origin = scene.env_origins[0].detach().cpu()
     for frame in range(root_pos.shape[0]):
         root_state = robot.data.default_root_state.clone()
         root_state[:, 0:3] = root_pos[frame]
@@ -280,16 +313,27 @@ def _compute_ee_positions(
 
         sim.forward()
         scene.update(dt)
+        data = robot.data
+        root_pos_out.append(_data_attr(data, "root_link_pos_w", "root_pos_w")[0].detach().cpu() - origin)
+        root_quat_out.append(_data_attr(data, "root_link_quat_w", "root_quat_w")[0].detach().cpu())
+        root_lin_vel_out.append(_data_attr(data, "root_link_lin_vel_w", "root_lin_vel_w")[0].detach().cpu())
+        root_ang_vel_out.append(_data_attr(data, "root_link_ang_vel_w", "root_ang_vel_w")[0].detach().cpu())
         body_pos = _data_attr(robot.data, "body_link_pos_w", "body_pos_w")
-        ee_pos.append(body_pos[0, ee_ids].detach().cpu())
+        ee_pos_out.append(body_pos[0, ee_ids].detach().cpu() - origin)
+        joint_pos_runtime = data.joint_pos[:, joint_ids]
+        joint_vel_runtime = data.joint_vel[:, joint_ids]
+        joint_pos_out.append(joint_pos_runtime[0].detach().cpu())
+        joint_vel_out.append(joint_vel_runtime[0].detach().cpu())
 
-    return torch.stack(ee_pos, dim=0)
-
-
-def _tan_norm_from_quat(quat: torch.Tensor) -> torch.Tensor:
-    mat = matrix_from_quat(quat)
-    return torch.cat([mat[..., :, 0], mat[..., :, 2]], dim=-1)
-
+    return (
+        torch.stack(root_pos_out, dim=0),
+        torch.stack(root_quat_out, dim=0),
+        torch.stack(root_lin_vel_out, dim=0),
+        torch.stack(root_ang_vel_out, dim=0),
+        torch.stack(ee_pos_out, dim=0),
+        torch.stack(joint_pos_out, dim=0),
+        torch.stack(joint_vel_out, dim=0),
+    )
 
 def _compute_windows(
     root_pos: torch.Tensor,
@@ -298,6 +342,7 @@ def _compute_windows(
     root_ang_vel: torch.Tensor,
     ee_pos: torch.Tensor,
     joint_pos: torch.Tensor,
+    joint_vel: torch.Tensor,
     window_size: int,
     stride: int,
 ) -> torch.Tensor | None:
@@ -317,33 +362,30 @@ def _compute_windows(
     win_root_ang_vel = root_ang_vel.index_select(0, flat_idx).reshape(num_windows, window_size, 3)
     win_ee_pos = ee_pos.index_select(0, flat_idx).reshape(num_windows, window_size, NUM_EE, 3)
     win_joint_pos = joint_pos.index_select(0, flat_idx).reshape(num_windows, window_size, NUM_JOINTS)
+    win_joint_vel = joint_vel.index_select(0, flat_idx).reshape(num_windows, window_size, NUM_JOINTS)
 
-    anchor_pos = win_root_pos[:, -1]
-    anchor_quat = win_root_quat[:, -1]
-    yaw = yaw_quat(anchor_quat)
-    yaw_w = yaw[:, None, :].expand(num_windows, window_size, 4).reshape(-1, 4)
-    heading_inv_w = quat_conjugate(yaw)[:, None, :].expand(num_windows, window_size, 4).reshape(-1, 4)
-
-    root_offset = win_root_pos - anchor_pos[:, None, :]
-    root_pos_local = quat_apply_inverse(yaw_w, root_offset.reshape(-1, 3)).reshape(num_windows, window_size, 3)
-    root_pos_local = root_pos_local.clone()
-    root_pos_local[..., 2] = win_root_pos[..., 2]
-
-    root_rot_local = quat_mul(heading_inv_w, win_root_quat.reshape(-1, 4)).reshape(num_windows, window_size, 4)
-    root_rot_6d = _tan_norm_from_quat(root_rot_local)
-
-    ee_offset = win_ee_pos - win_root_pos[:, :, None, :]
-    yaw_ee = yaw[:, None, None, :].expand(num_windows, window_size, NUM_EE, 4).reshape(-1, 4)
-    ee_pos_local = quat_apply_inverse(yaw_ee, ee_offset.reshape(-1, 3)).reshape(
-        num_windows, window_size, NUM_EE * 3
+    # EN: Use the same feature builder as online SMP reward, so offline
+    # pretraining data and runtime reward features share the exact layout.
+    # 中文：离线预训练数据直接调用在线 SMP reward 同一个特征构造器，
+    # 保证 feature 布局和坐标变换完全一致。
+    buffer = MotionFeatureBuffer(
+        num_envs=num_windows,
+        window_size=window_size,
+        num_joints=NUM_JOINTS,
+        num_ee=NUM_EE,
+        device=win_root_pos.device,
     )
-    lin_vel_local = quat_apply_inverse(yaw_w, win_root_lin_vel.reshape(-1, 3)).reshape(num_windows, window_size, 3)
-    ang_vel_local = quat_apply_inverse(yaw_w, win_root_ang_vel.reshape(-1, 3)).reshape(num_windows, window_size, 3)
-
-    return torch.cat(
-        [root_pos_local, root_rot_6d, win_joint_pos, ee_pos_local, lin_vel_local, ang_vel_local],
-        dim=-1,
+    buffer.reset(
+        torch.arange(num_windows, dtype=torch.long, device=win_root_pos.device),
+        win_root_pos,
+        win_root_quat,
+        win_root_lin_vel,
+        win_root_ang_vel,
+        win_ee_pos,
+        win_joint_pos,
+        win_joint_vel,
     )
+    return buffer.compute_features()
 
 
 def main() -> None:
@@ -378,7 +420,15 @@ def main() -> None:
             root_pos, root_quat, joint_pos, args_cli.input_fps, args_cli.output_fps
         )
         root_lin_vel, root_ang_vel, joint_vel = _finite_difference_velocities(root_pos, root_quat, joint_pos, dt)
-        ee_pos = _compute_ee_positions(
+        (
+            root_pos_sim,
+            root_quat_sim,
+            root_lin_vel_sim,
+            root_ang_vel_sim,
+            ee_pos,
+            joint_pos_sim,
+            joint_vel_sim,
+        ) = _replay_motion_kinematics(
             sim,
             scene,
             root_pos,
@@ -392,12 +442,13 @@ def main() -> None:
             dt,
         )
         windows = _compute_windows(
-            root_pos,
-            root_quat,
-            root_lin_vel,
-            root_ang_vel,
+            root_pos_sim,
+            root_quat_sim,
+            root_lin_vel_sim,
+            root_ang_vel_sim,
             ee_pos,
-            joint_pos,
+            joint_pos_sim,
+            joint_vel_sim,
             args_cli.window_size,
             args_cli.stride,
         )
