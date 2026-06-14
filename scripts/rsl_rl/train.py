@@ -77,6 +77,7 @@ if version.parse(installed_version) < version.parse(RSL_RL_VERSION):
 
 import logging
 import os
+from pathlib import Path
 import time
 from datetime import datetime
 
@@ -103,7 +104,8 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 # import logger
 logger = logging.getLogger(__name__)
 
-import SMP_catchball.tasks  # noqa: F401
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "source" / "SMP"))
+import SMP.tasks  # noqa: F401
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True

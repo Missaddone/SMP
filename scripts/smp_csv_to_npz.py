@@ -51,17 +51,17 @@ app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "source" / "SMP_catchball"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "source" / "SMP"))
 
 import isaaclab.sim as sim_utils  # noqa: E402
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg  # noqa: E402
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg  # noqa: E402
 from isaaclab.utils import configclass  # noqa: E402
 
-from SMP_catchball.robots.g1 import G1_CYLINDER_CFG  # noqa: E402
-from SMP_catchball.smp.feature_to_state import EE_BODY_NAMES, G1_JOINT_NAMES, NUM_EE, NUM_JOINTS  # noqa: E402
-from SMP_catchball.smp.utils import quat_conjugate, quat_mul  # noqa: E402
-from SMP_catchball.smp.utils import MotionFeatureBuffer  # noqa: E402
+from SMP.robots.g1 import G1_CYLINDER_CFG  # noqa: E402
+from SMP.smp.feature_to_state import EE_BODY_NAMES, G1_JOINT_NAMES, NUM_EE, NUM_JOINTS  # noqa: E402
+from SMP.smp.utils import quat_conjugate, quat_mul  # noqa: E402
+from SMP.smp.utils import MotionFeatureBuffer  # noqa: E402
 
 
 JOINT_NAMES: tuple[str, ...] = G1_JOINT_NAMES

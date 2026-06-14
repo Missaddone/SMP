@@ -10,8 +10,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from SMP_catchball.smp.model import DiffusionDenoiser
-from SMP_catchball.smp.scheduler import DDPMScheduler
+from SMP.smp.model import DiffusionDenoiser
+from SMP.smp.scheduler import DDPMScheduler
 
 
 def detect_device() -> str:

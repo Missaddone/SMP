@@ -8,6 +8,8 @@
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import sys
+from pathlib import Path
 
 from isaaclab.app import AppLauncher
 
@@ -35,7 +37,8 @@ import torch
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import parse_env_cfg
 
-import SMP_catchball.tasks  # noqa: F401
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "source" / "SMP"))
+import SMP.tasks  # noqa: F401
 
 
 def main():

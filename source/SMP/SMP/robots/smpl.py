@@ -2,7 +2,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 
-from SMP_catchball.assets import ASSET_DIR
+from SMP.assets import ASSET_DIR
 
 ##
 # Configuration

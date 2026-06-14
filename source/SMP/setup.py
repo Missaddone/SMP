@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Installation script for the 'SMP_catchball' python package."""
+"""Installation script for the 'SMP' python package."""
 
 import os
 
@@ -23,8 +23,8 @@ INSTALL_REQUIRES = [
 
 # Installation operation
 setup(
-    name="SMP_catchball",
-    # EN: Include nested packages such as SMP_catchball.smp/tasks/robots.
+    name="SMP",
+    # EN: Include nested packages such as SMP.smp/tasks/robots.
     # 中文：必须包含 smp/tasks/robots 等子包，否则 editable 安装后只能导入顶层包。
     packages=find_packages(),
     author=EXTENSION_TOML_DATA["package"]["author"],

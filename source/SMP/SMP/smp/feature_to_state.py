@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 
-from SMP_catchball.smp.utils import matrix_from_quat, quat_apply, quat_conjugate, quat_mul, yaw_quat
+from SMP.smp.utils import matrix_from_quat, quat_apply, quat_conjugate, quat_mul, yaw_quat
 
 NUM_JOINTS = 29
 G1_JOINT_NAMES: tuple[str, ...] = (

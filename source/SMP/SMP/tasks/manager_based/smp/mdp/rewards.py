@@ -13,8 +13,8 @@ from isaaclab.assets import Articulation
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils.math import quat_apply, wrap_to_pi
 
-from SMP_catchball.smp.feature_to_state import G1_JOINT_NAMES, NUM_JOINTS
-from SMP_catchball.smp.utils import DiffNormalizer, MotionFeatureBuffer
+from SMP.smp.feature_to_state import G1_JOINT_NAMES, NUM_JOINTS
+from SMP.smp.utils import DiffNormalizer, MotionFeatureBuffer
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv

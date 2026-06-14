@@ -20,8 +20,8 @@ from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import UniformNoiseCfg as Unoise
 
-from SMP_catchball.robots.g1 import G1_ACTION_SCALE, G1_CYLINDER_CFG
-from SMP_catchball.smp.feature_to_state import G1_JOINT_NAMES
+from SMP.robots.g1 import G1_ACTION_SCALE, G1_CYLINDER_CFG
+from SMP.smp.feature_to_state import G1_JOINT_NAMES
 
 from . import mdp
 
@@ -41,7 +41,7 @@ G1_JOINT_NAMES_LIST = list(G1_JOINT_NAMES)
 
 
 @configclass
-class SmpCatchballSceneCfg(InteractiveSceneCfg):
+class SmpSceneCfg(InteractiveSceneCfg):
     """Base scene configuration for SMP G1 tasks."""
 
     # ground plane
@@ -266,7 +266,7 @@ class SmpEnvCfg(ManagerBasedRLEnvCfg):
     """
 
     # Scene settings
-    scene: SmpCatchballSceneCfg = SmpCatchballSceneCfg(num_envs=4096, env_spacing=4.0)
+    scene: SmpSceneCfg = SmpSceneCfg(num_envs=4096, env_spacing=4.0)
     # Basic settings
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()

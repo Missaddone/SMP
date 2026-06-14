@@ -4,7 +4,7 @@ import torch
 
 from isaaclab.managers import SceneEntityCfg
 
-from SMP_catchball.smp.feature_to_state import (
+from SMP.smp.feature_to_state import (
     EE_BODY_NAMES,
     G1_JOINT_NAMES,
     NUM_EE,
@@ -12,7 +12,7 @@ from SMP_catchball.smp.feature_to_state import (
     rot6d_to_quat,
     slice_features,
 )
-from SMP_catchball.smp.utils import DiffNormalizer, MotionFeatureBuffer, load_denoiser, quat_apply, quat_mul, yaw_quat
+from SMP.smp.utils import DiffNormalizer, MotionFeatureBuffer, load_denoiser, quat_apply, quat_mul, yaw_quat
 
 
 @torch.no_grad()

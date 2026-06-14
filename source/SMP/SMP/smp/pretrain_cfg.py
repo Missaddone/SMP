@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from SMP_catchball.smp.utils import detect_device
+from SMP.smp.utils import detect_device
 
 
 @dataclass

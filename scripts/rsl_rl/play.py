@@ -69,6 +69,7 @@ installed_version = metadata.version("rsl-rl-lib")
 
 import os
 import time
+from pathlib import Path
 
 import gymnasium as gym
 import torch
@@ -97,7 +98,8 @@ import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
-import SMP_catchball.tasks  # noqa: F401
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "source" / "SMP"))
+import SMP.tasks  # noqa: F401
 
 
 def _warn_optional_onnx_export_failed(exc: Exception) -> None:

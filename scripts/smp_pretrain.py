@@ -6,10 +6,10 @@ import argparse
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "source" / "SMP_catchball"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "source" / "SMP"))
 
-from SMP_catchball.smp.pretrain import pretrain
-from SMP_catchball.smp.pretrain_cfg import PretrainCfg
+from SMP.smp.pretrain import pretrain
+from SMP.smp.pretrain_cfg import PretrainCfg
 
 
 def main() -> None:

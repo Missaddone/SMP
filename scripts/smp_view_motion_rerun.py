@@ -18,7 +18,7 @@ import numpy as np
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-ASSET_DIR = PROJECT_ROOT / "source" / "SMP_catchball" / "SMP_catchball" / "assets"
+ASSET_DIR = PROJECT_ROOT / "source" / "SMP" / "SMP" / "assets"
 DEFAULT_URDF = ASSET_DIR / "unitree_description" / "urdf" / "g1" / "main.urdf"
 
 G1_JOINT_NAMES = (

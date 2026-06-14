@@ -33,16 +33,16 @@ G1 retargeted CSV
 Updated:
 
 ```text
-source/SMP_catchball/SMP_catchball/tasks/manager_based/smp_catchball/smp_catchball_env_cfg.py
-source/SMP_catchball/SMP_catchball/tasks/manager_based/smp_catchball/__init__.py
-source/SMP_catchball/SMP_catchball/robots/g1.py
-source/SMP_catchball/SMP_catchball/robots/smpl.py
+source/SMP/SMP/tasks/manager_based/smp/smp_env_cfg.py
+source/SMP/SMP/tasks/manager_based/smp/__init__.py
+source/SMP/SMP/robots/g1.py
+source/SMP/SMP/robots/smpl.py
 ```
 
 Changes:
 
 - Replaced the original cartpole template robot with `G1_CYLINDER_CFG`.
-- Fixed robot asset imports from `whole_body_tracking.assets` to `SMP_catchball.assets`.
+- Fixed robot asset imports from `whole_body_tracking.assets` to `SMP.assets`.
 - Kept `SmpEnvCfg` as the reusable base SMP environment.
 - Registered the base template task and added `Smp-G1-Forward-v0`.
 - Added GSI startup/reset/refresh events to the base config.
@@ -53,13 +53,13 @@ Changes:
 Migrated or added:
 
 ```text
-source/SMP_catchball/SMP_catchball/smp/model.py
-source/SMP_catchball/SMP_catchball/smp/scheduler.py
-source/SMP_catchball/SMP_catchball/smp/dataset.py
-source/SMP_catchball/SMP_catchball/smp/pretrain.py
-source/SMP_catchball/SMP_catchball/smp/pretrain_cfg.py
-source/SMP_catchball/SMP_catchball/smp/utils.py
-source/SMP_catchball/SMP_catchball/smp/feature_to_state.py
+source/SMP/SMP/smp/model.py
+source/SMP/SMP/smp/scheduler.py
+source/SMP/SMP/smp/dataset.py
+source/SMP/SMP/smp/pretrain.py
+source/SMP/SMP/smp/pretrain_cfg.py
+source/SMP/SMP/smp/utils.py
+source/SMP/SMP/smp/feature_to_state.py
 ```
 
 Capabilities:
@@ -114,11 +114,11 @@ python scripts\smp_pretrain.py `
 Updated or added:
 
 ```text
-source/SMP_catchball/SMP_catchball/tasks/manager_based/smp_catchball/mdp/events.py
-source/SMP_catchball/SMP_catchball/tasks/manager_based/smp_catchball/mdp/rewards.py
-source/SMP_catchball/SMP_catchball/tasks/manager_based/smp_catchball/mdp/commands.py
-source/SMP_catchball/SMP_catchball/tasks/manager_based/smp_catchball/mdp/terminations.py
-source/SMP_catchball/SMP_catchball/tasks/manager_based/smp_catchball/mdp/__init__.py
+source/SMP/SMP/tasks/manager_based/smp/mdp/events.py
+source/SMP/SMP/tasks/manager_based/smp/mdp/rewards.py
+source/SMP/SMP/tasks/manager_based/smp/mdp/commands.py
+source/SMP/SMP/tasks/manager_based/smp/mdp/terminations.py
+source/SMP/SMP/tasks/manager_based/smp/mdp/__init__.py
 ```
 
 Capabilities:
@@ -267,14 +267,14 @@ Expected:
 
 ```text
 Smp-G1-Forward-v0
-Template-Smp-Catchball-v0
+Template-SMP-v0
 ```
 
 If registration fails, inspect:
 
 ```text
-source/SMP_catchball/SMP_catchball/tasks/manager_based/smp_catchball/__init__.py
-source/SMP_catchball/SMP_catchball/__init__.py
+source/SMP/SMP/tasks/manager_based/smp/__init__.py
+source/SMP/SMP/__init__.py
 ```
 
 ### 2. Convert CSV To NPZ
@@ -369,7 +369,7 @@ Current default checkpoint path in `SmpEnvCfg` resolves to:
 If that path does not exist on the runtime machine, change:
 
 ```text
-source/SMP_catchball/SMP_catchball/tasks/manager_based/smp_catchball/smp_catchball_env_cfg.py
+source/SMP/SMP/tasks/manager_based/smp/smp_env_cfg.py
 ```
 
 Then run:

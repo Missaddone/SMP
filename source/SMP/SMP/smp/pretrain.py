@@ -11,11 +11,11 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
 
-from SMP_catchball.smp.dataset import MotionWindowDataset
-from SMP_catchball.smp.model import DiffusionDenoiser
-from SMP_catchball.smp.pretrain_cfg import PretrainCfg
-from SMP_catchball.smp.scheduler import DDPMScheduler
-from SMP_catchball.smp.utils import count_parameters, seed_everything
+from SMP.smp.dataset import MotionWindowDataset
+from SMP.smp.model import DiffusionDenoiser
+from SMP.smp.pretrain_cfg import PretrainCfg
+from SMP.smp.scheduler import DDPMScheduler
+from SMP.smp.utils import count_parameters, seed_everything
 
 
 class Ema:
