@@ -66,10 +66,25 @@ class SteeringCommand(CommandTerm):
             theta = torch.zeros(num_envs, device=self.device)
         self.tar_dir_w[env_ids, 0] = torch.cos(theta)
         self.tar_dir_w[env_ids, 1] = torch.sin(theta)
-        self.tar_speed[env_ids] = torch.empty(num_envs, device=self.device).uniform_(
-            self.cfg.tar_speed_min,
-            self.cfg.tar_speed_max,
-        )
+        if self.cfg.deadzone_sample_prob > 0.0 and self.cfg.speed_deadzone > self.cfg.tar_speed_min:
+            deadzone_mask = torch.rand(num_envs, device=self.device) < self.cfg.deadzone_sample_prob
+            speeds = torch.empty(num_envs, device=self.device)
+            if deadzone_mask.any():
+                speeds[deadzone_mask] = torch.empty(int(deadzone_mask.sum()), device=self.device).uniform_(
+                    self.cfg.tar_speed_min,
+                    self.cfg.speed_deadzone,
+                )
+            if (~deadzone_mask).any():
+                speeds[~deadzone_mask] = torch.empty(int((~deadzone_mask).sum()), device=self.device).uniform_(
+                    max(self.cfg.speed_deadzone, self.cfg.tar_speed_min),
+                    self.cfg.tar_speed_max,
+                )
+            self.tar_speed[env_ids] = speeds
+        else:
+            self.tar_speed[env_ids] = torch.empty(num_envs, device=self.device).uniform_(
+                self.cfg.tar_speed_min,
+                self.cfg.tar_speed_max,
+            )
         if self.cfg.rand_face_dir:
             face_theta = torch.empty(num_envs, device=self.device).uniform_(-math.pi, math.pi)
         else:
@@ -135,6 +150,7 @@ class SteeringCommandCfg(CommandTermCfg):
     tar_speed_min: float = 0.5
     tar_speed_max: float = 3.0
     speed_deadzone: float = 0.0
+    deadzone_sample_prob: float = 0.0
     viz_z_offset: float = 0.7
     viz_scale: float = 1.5
     goal_vel_visualizer_cfg: VisualizationMarkersCfg = GREEN_ARROW_X_MARKER_CFG.replace(

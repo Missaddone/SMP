@@ -26,6 +26,10 @@ from SMP.smp.feature_to_state import G1_JOINT_NAMES
 from . import mdp
 
 
+################################################################################
+# Project paths and shared constants
+################################################################################
+
 # EN: Resolve checkpoints relative to this migrated project instead of the
 # original Windows smp-master path. This keeps launches independent of cwd.
 # 中文：预训练模型路径从当前迁移工程解析，不再使用原工程的 Windows 绝对路径；
@@ -35,9 +39,9 @@ PRETRAIN_CKPT_DIR = PROJECT_ROOT / "datasets" / "pretrain_ckpt"
 G1_JOINT_NAMES_LIST = list(G1_JOINT_NAMES)
 
 
-##
+################################################################################
 # Scene definition
-##
+################################################################################
 
 
 @configclass
@@ -63,9 +67,14 @@ class SmpSceneCfg(InteractiveSceneCfg):
     )
 
 
-##
-# MDP settings
-##
+################################################################################
+# Base MDP components
+################################################################################
+
+
+########################################
+# Actions
+########################################
 
 
 @configclass
@@ -81,11 +90,21 @@ class ActionsCfg:
     )
 
 
+########################################
+# Commands
+########################################
+
+
 @configclass
 class CommandsCfg:
     """Command specifications for the MDP."""
 
     pass
+
+
+########################################
+# Observations
+########################################
 
 
 @configclass
@@ -149,6 +168,11 @@ class ObservationsCfg:
     # observation groups
     policy: PolicyCfg = PolicyCfg()
     critic: CriticCfg = CriticCfg()
+
+
+########################################
+# Events
+########################################
 
 
 @configclass
@@ -220,6 +244,11 @@ class EventCfg:
     )
 
 
+########################################
+# Rewards
+########################################
+
+
 @configclass
 class RewardsCfg:
     """Reward terms for the MDP."""
@@ -239,6 +268,11 @@ class RewardsCfg:
     )
 
 
+########################################
+# Terminations
+########################################
+
+
 @configclass
 class TerminationsCfg:
     """Termination terms for the MDP."""
@@ -252,9 +286,9 @@ class TerminationsCfg:
     )
 
 
-##
-# Environment configuration
-##
+################################################################################
+# Base environment configuration
+################################################################################
 
 
 @configclass
@@ -290,6 +324,11 @@ class SmpEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.render_interval = self.decimation
 
 
+################################################################################
+# Forward task components
+################################################################################
+
+
 @configclass
 class ForwardCommandsCfg(CommandsCfg):
     """Forward locomotion command configuration."""
@@ -305,6 +344,11 @@ class ForwardCommandsCfg(CommandsCfg):
     )
 
 
+################################################################################
+# Steering task components
+################################################################################
+
+
 @configclass
 class SteeringCommandsCfg(CommandsCfg):
     """Random directional running command configuration."""
@@ -315,7 +359,7 @@ class SteeringCommandsCfg(CommandsCfg):
         rand_tar_dir=True,
         rand_face_dir=False,
         tar_speed_min=0.6,
-        tar_speed_max=3.0,
+        tar_speed_max=5.0,
         speed_deadzone=0.5,
     )
 
@@ -332,6 +376,7 @@ class SteeringModifiedCommandsCfg(CommandsCfg):
         tar_speed_min=0.0,
         tar_speed_max=3.0,
         speed_deadzone=0.5,
+        deadzone_sample_prob=0.4,
     )
 
 
@@ -396,12 +441,12 @@ class SteeringModifiedRewardsCfg(RewardsCfg):
         params={
             "command_name": "steering",
             "vel_err_scale": 1.0,
-            "velocity_weight": 1.0,
+            "velocity_weight": 1.5,
             "face_weight": 0.5,
             "deadzone_stand_weight": 0.5,
             "deadzone_lin_vel_penalty_weight": 2.0,
-            "deadzone_joint_vel_penalty_weight": 0.05,
-            "deadzone_action_penalty_weight": 0.05,
+            "deadzone_joint_vel_penalty_weight": 0.1,
+            "deadzone_action_penalty_weight": 0.1,
             "fixed_timesteps": (8, 15, 22),
             "ws": 6.0,
         },
@@ -414,6 +459,11 @@ class ForwardTerminationsCfg(TerminationsCfg):
         func=mdp.root_height_below_minimum,
         params={"minimum_height": 0.3, "asset_cfg": SceneEntityCfg("robot")},
     )
+
+
+################################################################################
+# Getup task components
+################################################################################
 
 
 @configclass
@@ -463,6 +513,11 @@ class GetupTerminationsCfg(TerminationsCfg):
         time_out=True,
         params={"head_height": 1.2, "max_speed": 0.5, "hold_steps": 25},
     )
+
+
+################################################################################
+# Final task environment configs
+################################################################################
 
 
 @configclass
