@@ -295,6 +295,60 @@ def steering_modified_task_smp_product(
     return task * smp_guidance_reward(env, fixed_timesteps=fixed_timesteps, ws=ws)
 
 
+def steering_modified_stand_branch_reward(
+    env: ManagerBasedRLEnv,
+    command_name: str = "steering",
+    vel_err_scale: float = 1.0,
+    velocity_weight: float = 1.0,
+    face_weight: float = 0.5,
+    deadzone_stand_weight: float = 0.5,
+    deadzone_lin_vel_penalty_weight: float = 2.0,
+    deadzone_joint_vel_penalty_weight: float = 0.05,
+    deadzone_action_penalty_weight: float = 0.05,
+    fixed_timesteps: tuple[int, ...] = (8, 15, 22),
+    ws: float = 6.0,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Use SMP style only for moving commands, and pure standing reward in the deadzone.
+
+    EN: For commands outside ``speed_deadzone``, keep the original steering
+    layout ``(velocity_weight * velocity + face_weight * face) * SMP``. For
+    commands inside ``speed_deadzone``, do not use the SMP prior; instead use a
+    quiet-standing reward with explicit penalties for root xy velocity, joint
+    velocity, and action magnitude.
+
+    中文：速度命令在死区外时，仍然使用原 steering 的
+    ``(velocity_weight * velocity + face_weight * face) * SMP``。速度命令在
+    死区内时，不使用 SMP prior，而是切换到站立静止奖励，并显式惩罚 root
+    水平速度、关节速度和 action 幅值。
+    """
+    moving_mask = _command_moving_mask(env, command_name)
+    velocity = steering_target_velocity(env, command_name=command_name, vel_err_scale=vel_err_scale)
+    face = steering_face_direction(env, command_name=command_name)
+    task = velocity_weight * velocity + face_weight * face
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    if not hasattr(env, "_smp_joint_indexes"):
+        joint_ids, joint_names = asset.find_joints(list(G1_JOINT_NAMES), preserve_order=True)
+        if len(joint_ids) != NUM_JOINTS:
+            raise RuntimeError(f"Expected SMP joints {G1_JOINT_NAMES}, but got {joint_names}.")
+        env._smp_joint_indexes = torch.tensor(joint_ids, dtype=torch.long, device=env.device)
+    joint_ids = env._smp_joint_indexes
+
+    root_vel_xy = _root_lin_vel_w(asset.data)[:, :2]
+    root_speed_sq = torch.sum(root_vel_xy**2, dim=-1)
+    joint_vel_sq = torch.mean(asset.data.joint_vel[:, joint_ids] ** 2, dim=-1)
+    action_sq = torch.mean(env.action_manager.action**2, dim=-1)
+    stand = deadzone_stand_weight * standing_still_reward(env)
+    stand = stand - deadzone_lin_vel_penalty_weight * root_speed_sq
+    stand = stand - deadzone_joint_vel_penalty_weight * joint_vel_sq
+    stand = stand - deadzone_action_penalty_weight * action_sq
+    stand = torch.clamp(stand, min=0.0)
+
+    moving = task * smp_guidance_reward(env, fixed_timesteps=fixed_timesteps, ws=ws, env_mask=moving_mask)
+    return torch.where(moving_mask, moving, stand)
+
+
 def _virtual_head_state(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names="torso_link"),
