@@ -141,9 +141,9 @@ class SteeringModifiedCommandsCfg(CommandsCfg):
         resampling_time_range=(3.0, 8.0),
         rand_tar_dir=True,
         rand_face_dir=False,
-        tar_speed_min=0.0,
-        tar_speed_max=3.0,
-        speed_deadzone=0.5,
+        tar_speed_min=-0.5,
+        tar_speed_max=0.1,
+        speed_deadzone=0.1,
         deadzone_sample_prob=0.4,
     )
 
@@ -314,8 +314,8 @@ class SteeringEventCfg(EventCfg):
         func=mdp.init_smp_state,
         mode="startup",
         params={
-            "ckpt_path": str(PRETRAIN_CKPT_DIR / "pretrained_jushen.pt"),
-            # "ckpt_path": str(PRETRAIN_CKPT_DIR / "pretrained_lafan_run.pt"),
+            # "ckpt_path": str(PRETRAIN_CKPT_DIR / "pretrained_jushen.pt"),
+            "ckpt_path": str(PRETRAIN_CKPT_DIR / "pretrained_lafan_run.pt"),
             "gsi_buffer_size": 4096,
             "gsi_batch_size": 1024,
         },

@@ -439,16 +439,28 @@ def steering_target_velocity(
     speed_deadzone = getattr(command.cfg, "speed_deadzone", 0.0)
     # print("target_speed:", command.tar_speed)
     # print("root_speed:", torch.linalg.norm(root_vel_xy, dim=-1))
+    deadzone_speed_bias = -0.1
     tar_speed = torch.where(
         command.tar_speed < speed_deadzone,
-        torch.zeros_like(command.tar_speed),
+        torch.full_like(command.tar_speed, deadzone_speed_bias),
         command.tar_speed,
     )
     tar_vel = tar_speed.unsqueeze(-1) * command.tar_dir_w
     vel_err = ((tar_vel - root_vel_xy) ** 2).sum(dim=-1)
     proj_speed = (command.tar_dir_w * root_vel_xy).sum(dim=-1)
+    # 非负reward, 误差越小reward接近1，误差越大reward接近0
     reward = torch.exp(-vel_err_scale * vel_err)
-    return torch.where(proj_speed < 0.0, torch.zeros_like(reward), reward)
+    # 如果投影速度小于0，直接设置为0
+    # return torch.where(proj_speed < 0.0, torch.zeros_like(reward), reward)
+    # 速度不同号这设置为0，同时防止在0附近抖动
+    eps = 1e-6
+    wrong_direction = (torch.abs(tar_speed) > eps) & (torch.abs(proj_speed) > eps) & (tar_speed * proj_speed < 0.0)
+
+    return torch.where(
+        wrong_direction,
+        torch.zeros_like(reward),
+        reward,
+    )
 
 
 def steering_face_direction(
