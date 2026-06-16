@@ -8,7 +8,6 @@ from pathlib import Path
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
-from isaaclab.managers import CommandTermCfg as CmdTerm
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -102,52 +101,6 @@ class CommandsCfg:
     pass
 
 
-@configclass
-class ForwardCommandsCfg(CommandsCfg):
-    """Command config used by Smp-G1-Forward-v0."""
-
-    steering: CmdTerm = mdp.SteeringCommandCfg(
-        asset_name="robot",
-        resampling_time_range=(3.0, 8.0),
-        rand_tar_dir=False,
-        rand_face_dir=False,
-        tar_speed_min=0.0,
-        tar_speed_max=5.0,
-        speed_deadzone=0.5,
-    )
-
-
-@configclass
-class SteeringCommandsCfg(CommandsCfg):
-    """Command config used by Smp-G1-Steering-v0."""
-
-    steering: CmdTerm = mdp.SteeringCommandCfg(
-        asset_name="robot",
-        resampling_time_range=(3.0, 8.0),
-        rand_tar_dir=True,
-        rand_face_dir=False,
-        tar_speed_min=0.6,
-        tar_speed_max=5.0,
-        speed_deadzone=0.5,
-    )
-
-
-@configclass
-class SteeringModifiedCommandsCfg(CommandsCfg):
-    """Command config used by Smp-G1-Steering-modified-v0."""
-
-    steering: CmdTerm = mdp.SteeringCommandCfg(
-        asset_name="robot",
-        resampling_time_range=(3.0, 8.0),
-        rand_tar_dir=True,
-        rand_face_dir=False,
-        tar_speed_min=-0.5,
-        tar_speed_max=0.1,
-        speed_deadzone=0.1,
-        deadzone_sample_prob=0.4,
-    )
-
-
 ########################################
 # Observations
 ########################################
@@ -212,22 +165,6 @@ class ObservationsCfg:
             self.history_length = 10
 
     # observation groups
-    policy: PolicyCfg = PolicyCfg()
-    critic: CriticCfg = CriticCfg()
-
-
-@configclass
-class ForwardObservationsCfg(ObservationsCfg):
-    """Observation config used by forward and steering tasks."""
-
-    @configclass
-    class PolicyCfg(ObservationsCfg.PolicyCfg):
-        command = ObsTerm(func=mdp.generated_commands, params={"command_name": "steering"})
-
-    @configclass
-    class CriticCfg(ObservationsCfg.CriticCfg):
-        command = ObsTerm(func=mdp.generated_commands, params={"command_name": "steering"})
-
     policy: PolicyCfg = PolicyCfg()
     critic: CriticCfg = CriticCfg()
 
@@ -306,38 +243,6 @@ class EventCfg:
     )
 
 
-@configclass
-class SteeringEventCfg(EventCfg):
-    """Event config used by steering tasks."""
-
-    init_smp_state = EventTerm(
-        func=mdp.init_smp_state,
-        mode="startup",
-        params={
-            # "ckpt_path": str(PRETRAIN_CKPT_DIR / "pretrained_jushen.pt"),
-            "ckpt_path": str(PRETRAIN_CKPT_DIR / "pretrained_lafan_run.pt"),
-            "gsi_buffer_size": 4096,
-            "gsi_batch_size": 1024,
-        },
-    )
-
-
-@configclass
-class GetupEventCfg(EventCfg):
-    """Event config used by Smp-G1-Getup-v0."""
-
-    init_smp_state = EventTerm(
-        func=mdp.init_smp_state,
-        mode="startup",
-        params={
-            "ckpt_path": str(PRETRAIN_CKPT_DIR / "pretrained_getup_f2s2.pt"),
-            "gsi_buffer_size": 4096,
-            "gsi_batch_size": 1024,
-        },
-    )
-    reset_stand_counter = EventTerm(func=mdp.reset_stand_counter, mode="reset")
-
-
 ########################################
 # Rewards
 ########################################
@@ -362,88 +267,6 @@ class RewardsCfg:
     )
 
 
-@configclass
-class ForwardRewardsCfg(RewardsCfg):
-    """Reward config used by Smp-G1-Forward-v0."""
-
-    alive = None
-    terminating = None
-    smp = None
-    task_smp_product = RewTerm(
-        func=mdp.forward_task_smp_product,
-        weight=1.0,
-        params={
-            "command_name": "steering",
-            "vel_err_scale": 0.5,
-            "fixed_timesteps": (8, 15, 22),
-            "ws": 6.0,
-        },
-    )
-
-
-@configclass
-class SteeringRewardsCfg(RewardsCfg):
-    """Reward config used by Smp-G1-Steering-v0."""
-
-    alive = None
-    terminating = None
-    smp = None
-    task_smp_product = RewTerm(
-        func=mdp.steering_task_smp_product,
-        weight=1.0,
-        params={
-            "command_name": "steering",
-            "vel_err_scale": 1.0,
-            "velocity_weight": 0.5,
-            "face_weight": 0.5,
-            "fixed_timesteps": (8, 15, 22),
-            "ws": 6.0,
-        },
-    )
-
-
-@configclass
-class SteeringModifiedRewardsCfg(RewardsCfg):
-    """Reward config used by Smp-G1-Steering-modified-v0."""
-
-    alive = None
-    terminating = None
-    smp = None
-    task_smp_product = RewTerm(
-        func=mdp.steering_modified_stand_branch_reward,
-        weight=1.0,
-        params={
-            "command_name": "steering",
-            "vel_err_scale": 1.0,
-            "velocity_weight": 1.5,
-            "face_weight": 0.5,
-            "deadzone_stand_weight": 0.5,
-            "deadzone_lin_vel_penalty_weight": 2.0,
-            "deadzone_joint_vel_penalty_weight": 0.1,
-            "deadzone_action_penalty_weight": 0.1,
-            "fixed_timesteps": (8, 15, 22),
-            "ws": 6.0,
-        },
-    )
-
-
-@configclass
-class GetupRewardsCfg(RewardsCfg):
-    """Reward config used by Smp-G1-Getup-v0."""
-
-    alive = None
-    terminating = None
-    smp = None
-    task_smp_product = RewTerm(
-        func=mdp.getup_task_smp_product,
-        weight=1.0,
-        params={
-            "fixed_timesteps": (8, 15, 22),
-            "ws": 6.0,
-        },
-    )
-
-
 ########################################
 # Terminations
 ########################################
@@ -462,34 +285,8 @@ class TerminationsCfg:
     )
 
 
-@configclass
-class ForwardTerminationsCfg(TerminationsCfg):
-    """Termination config used by forward and steering tasks."""
-
-    base_too_low = DoneTerm(
-        func=mdp.root_height_below_minimum,
-        params={"minimum_height": 0.3, "asset_cfg": SceneEntityCfg("robot")},
-    )
-
-
-@configclass
-class GetupTerminationsCfg(TerminationsCfg):
-    """Termination config used by Smp-G1-Getup-v0."""
-
-    base_contact = None
-    smp_too_low = DoneTerm(
-        func=mdp.smp_too_low,
-        params={"threshold": 0.02, "ws": 6.0, "grace_steps": 5},
-    )
-    stood_up = DoneTerm(
-        func=mdp.stood_up,
-        time_out=True,
-        params={"head_height": 1.2, "max_speed": 0.5, "hold_steps": 25},
-    )
-
-
 ################################################################################
-# Task environment configs
+# Base environment config
 ################################################################################
 
 
@@ -524,43 +321,3 @@ class SmpEnvCfg(ManagerBasedRLEnvCfg):
         # simulation settings
         self.sim.dt = 1 / 200
         self.sim.render_interval = self.decimation
-
-
-@configclass
-class SmpG1ForwardEnvCfg(SmpEnvCfg):
-    """G1 forward locomotion task with SMP guidance."""
-
-    commands: ForwardCommandsCfg = ForwardCommandsCfg()
-    observations: ForwardObservationsCfg = ForwardObservationsCfg()
-    rewards: ForwardRewardsCfg = ForwardRewardsCfg()
-    terminations: ForwardTerminationsCfg = ForwardTerminationsCfg()
-
-
-@configclass
-class SmpG1SteeringEnvCfg(SmpG1ForwardEnvCfg):
-    """G1 random steering task with SMP guidance."""
-
-    commands: SteeringCommandsCfg = SteeringCommandsCfg()
-    events: SteeringEventCfg = SteeringEventCfg()
-    rewards: SteeringRewardsCfg = SteeringRewardsCfg()
-
-
-@configclass
-class SmpG1SteeringModifiedEnvCfg(SmpG1SteeringEnvCfg):
-    """Random steering task with a standing branch in the command deadzone."""
-
-    commands: SteeringModifiedCommandsCfg = SteeringModifiedCommandsCfg()
-    rewards: SteeringModifiedRewardsCfg = SteeringModifiedRewardsCfg()
-
-
-@configclass
-class SmpG1GetupEnvCfg(SmpEnvCfg):
-    """G1 getup task with SMP guidance."""
-
-    events: GetupEventCfg = GetupEventCfg()
-    rewards: GetupRewardsCfg = GetupRewardsCfg()
-    terminations: GetupTerminationsCfg = GetupTerminationsCfg()
-
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        self.episode_length_s = 5.0

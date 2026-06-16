@@ -54,3 +54,8 @@ class SteeringPPORunnerCfg(PPORunnerCfg):
 @configclass
 class SteeringModifiedPPORunnerCfg(PPORunnerCfg):
     experiment_name = "smp_steering_modified_g1"
+
+
+@configclass
+class SteeringDoublePriorPPORunnerCfg(PPORunnerCfg):
+    experiment_name = "smp_steering_doubleprior_g1"

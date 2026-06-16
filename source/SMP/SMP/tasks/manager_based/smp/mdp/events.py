@@ -112,6 +112,56 @@ def init_smp_state(
         gsi_reset(env, None)
 
 
+def init_smp_double_prior_state(
+    env,
+    env_ids: torch.Tensor | None,
+    moving_ckpt_path: str = "",
+    stand_ckpt_path: str = "",
+    gsi_buffer_size: int = 4096,
+    gsi_batch_size: int = 1024,
+) -> None:
+    """Load two SMP priors while keeping GSI on the moving prior.
+
+    EN: The moving prior is installed as the default ``_smp_bundle`` and is used
+    for GSI. The standing prior is stored in ``_smp_prior_bundles["stand"]`` and
+    is intended for reward computation only.
+    中文：moving prior 会作为默认 ``_smp_bundle``，继续负责 GSI。standing
+    prior 只保存在 ``_smp_prior_bundles["stand"]`` 里，用于 reward 计算。
+    """
+    if not moving_ckpt_path:
+        raise RuntimeError("init_smp_double_prior_state requires a non-empty `moving_ckpt_path`.")
+    if not stand_ckpt_path:
+        raise RuntimeError("init_smp_double_prior_state requires a non-empty `stand_ckpt_path`.")
+
+    init_smp_state(
+        env,
+        env_ids,
+        ckpt_path=moving_ckpt_path,
+        gsi_buffer_size=gsi_buffer_size,
+        gsi_batch_size=gsi_batch_size,
+    )
+
+    moving_bundle = env._smp_bundle
+    moving_normalizer = env._smp_normalizer
+    stand_model, stand_scheduler, stand_q_low, stand_q_high, stand_feature_dim, stand_window_size = load_denoiser(
+        stand_ckpt_path, env.device
+    )
+    _, _, _, _, moving_feature_dim, moving_window_size = moving_bundle
+    if stand_feature_dim != moving_feature_dim:
+        raise ValueError(f"Stand SMP prior feature_dim={stand_feature_dim}, expected {moving_feature_dim}.")
+    if stand_window_size != moving_window_size:
+        raise ValueError(f"Stand SMP prior window_size={stand_window_size}, expected {moving_window_size}.")
+
+    env._smp_prior_bundles = {
+        "moving": moving_bundle,
+        "stand": (stand_model, stand_scheduler, stand_q_low, stand_q_high, stand_feature_dim, stand_window_size),
+    }
+    env._smp_prior_normalizers = {
+        "moving": moving_normalizer,
+        "stand": DiffNormalizer(stand_scheduler.num_timesteps, torch.device(env.device)),
+    }
+
+
 def _control_dt(env) -> float:
     if hasattr(env, "step_dt"):
         return float(env.step_dt)

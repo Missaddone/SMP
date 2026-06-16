@@ -74,13 +74,20 @@ def smp_guidance_reward(
     ws: float = 4.0,
     normalize: bool = True,
     env_mask: torch.Tensor | None = None,
+    prior_name: str = "moving",
 ) -> torch.Tensor:
     """Compute the frozen-prior SDS guidance reward for the current G1 motion window."""
     if not hasattr(env, "_smp_bundle"):
         raise RuntimeError("SMP prior is not initialized. Add init_smp_state as a startup event.")
 
-    model, scheduler, q_low, q_high, _, _ = env._smp_bundle
-    normalizer: DiffNormalizer = env._smp_normalizer
+    if hasattr(env, "_smp_prior_bundles"):
+        if prior_name not in env._smp_prior_bundles:
+            raise RuntimeError(f"SMP prior '{prior_name}' is not initialized.")
+        model, scheduler, q_low, q_high, _, _ = env._smp_prior_bundles[prior_name]
+        normalizer: DiffNormalizer = env._smp_prior_normalizers[prior_name]
+    else:
+        model, scheduler, q_low, q_high, _, _ = env._smp_bundle
+        normalizer: DiffNormalizer = env._smp_normalizer
     buffer: MotionFeatureBuffer = env._smp_buffer
     _update_smp_buffer_from_sim(env)
 
@@ -347,6 +354,73 @@ def steering_modified_stand_branch_reward(
 
     moving = task * smp_guidance_reward(env, fixed_timesteps=fixed_timesteps, ws=ws, env_mask=moving_mask)
     return torch.where(moving_mask, moving, stand)
+
+
+def steering_doubleprior_task_reward(
+    env: ManagerBasedRLEnv,
+    command_name: str = "steering",
+    vel_err_scale: float = 1.0,
+    velocity_weight: float = 1.0,
+    face_weight: float = 0.5,
+    deadzone_stand_weight: float = 0.5,
+    deadzone_lin_vel_penalty_weight: float = 2.0,
+    deadzone_joint_vel_penalty_weight: float = 0.05,
+    deadzone_action_penalty_weight: float = 0.05,
+    fixed_timesteps: tuple[int, ...] = (8, 15, 22),
+    moving_ws: float = 6.0,
+    stand_ws: float = 6.0,
+    moving_prior_name: str = "moving",
+    stand_prior_name: str = "stand",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Steering reward with separate moving and standing SMP priors.
+
+    EN: Moving commands use the locomotion prior. Deadzone commands use a
+    standing task reward multiplied by the standing prior. GSI still comes from
+    the moving prior.
+    中文：运动命令使用 locomotion prior；死区命令使用站立任务奖励乘 standing
+    prior。GSI 仍由 moving prior 负责。
+    """
+    moving_mask = _command_moving_mask(env, command_name)
+    velocity = steering_target_velocity(env, command_name=command_name, vel_err_scale=vel_err_scale)
+    face = steering_face_direction(env, command_name=command_name)
+    moving_task = velocity_weight * velocity + face_weight * face
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    if not hasattr(env, "_smp_joint_indexes"):
+        joint_ids, joint_names = asset.find_joints(list(G1_JOINT_NAMES), preserve_order=True)
+        if len(joint_ids) != NUM_JOINTS:
+            raise RuntimeError(f"Expected SMP joints {G1_JOINT_NAMES}, but got {joint_names}.")
+        env._smp_joint_indexes = torch.tensor(joint_ids, dtype=torch.long, device=env.device)
+    joint_ids = env._smp_joint_indexes
+
+    root_vel_xy = _root_lin_vel_w(asset.data)[:, :2]
+    root_speed_sq = torch.sum(root_vel_xy**2, dim=-1)
+    joint_vel_sq = torch.mean(asset.data.joint_vel[:, joint_ids] ** 2, dim=-1)
+    action_sq = torch.mean(env.action_manager.action**2, dim=-1)
+    stand_task = deadzone_stand_weight * standing_still_reward(env)
+    stand_task = stand_task - deadzone_lin_vel_penalty_weight * root_speed_sq
+    stand_task = stand_task - deadzone_joint_vel_penalty_weight * joint_vel_sq
+    stand_task = stand_task - deadzone_action_penalty_weight * action_sq
+    stand_task = torch.clamp(stand_task, min=0.0)
+
+    moving_style = smp_guidance_reward(
+        env,
+        fixed_timesteps=fixed_timesteps,
+        ws=moving_ws,
+        env_mask=moving_mask,
+        prior_name=moving_prior_name,
+    )
+    stand_style = smp_guidance_reward(
+        env,
+        fixed_timesteps=fixed_timesteps,
+        ws=stand_ws,
+        env_mask=~moving_mask,
+        prior_name=stand_prior_name,
+    )
+    moving_reward = moving_task * moving_style
+    stand_reward = stand_task * stand_style
+    return torch.where(moving_mask, moving_reward, stand_reward)
 
 
 def _virtual_head_state(
