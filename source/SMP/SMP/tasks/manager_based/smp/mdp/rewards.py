@@ -163,7 +163,7 @@ def _root_ang_vel_w(data) -> torch.Tensor:
     return data.root_link_ang_vel_w if hasattr(data, "root_link_ang_vel_w") else data.root_ang_vel_w
 
 
-def standing_still_reward(
+def old_standing_pose_reward(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     joint_std: float = 0.15,
@@ -197,6 +197,74 @@ def standing_still_reward(
     action = env.action_manager.action
     action_regularization = torch.exp(-action_scale * torch.mean(action**2, dim=-1))
     return 0.30 * lin_quiet + 0.20 * ang_quiet + 0.25 * upright + 0.15 * pose + 0.10 * action_regularization
+
+
+def standing_still_reward(env: ManagerBasedRLEnv, **kwargs) -> torch.Tensor:
+    """Backward-compatible alias for the old deadzone standing reward.
+
+    EN: Keep the previous reward design available for ablation and old configs.
+    中文：保留旧版站立奖励，方便复现实验和做消融对比。
+    """
+    return old_standing_pose_reward(env, **kwargs)
+
+
+def standing_pose_reward(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    target_height: float = 0.76,
+    height_std: float = 0.08,
+    joint_std: float = 0.12,
+    upright_scale: float = 8.0,
+    lin_vel_scale: float = 4.0,
+    ang_vel_scale: float = 1.0,
+    joint_vel_scale: float = 0.05,
+    action_scale: float = 0.1,
+) -> torch.Tensor:
+    """Reward a strict default standing pose for low-speed/deadzone commands.
+
+    EN: This is the new standing reward. Compared with
+    ``old_standing_pose_reward``, it adds an explicit root-height target and
+    gives more weight to the default joint pose, so the policy is pushed toward
+    a real standing posture instead of any quiet low-motion posture.
+
+    中文：这是新版站立奖励。相比 ``old_standing_pose_reward``，它显式约束
+    root 高度，并提高默认关节姿态的权重，让策略更倾向于标准站姿，而不是
+    任意一种“低速不动”的奇怪姿态。
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    data = asset.data
+    if not hasattr(env, "_smp_joint_indexes"):
+        joint_ids, joint_names = asset.find_joints(list(G1_JOINT_NAMES), preserve_order=True)
+        if len(joint_ids) != NUM_JOINTS:
+            raise RuntimeError(f"Expected SMP joints {G1_JOINT_NAMES}, but got {joint_names}.")
+        env._smp_joint_indexes = torch.tensor(joint_ids, dtype=torch.long, device=env.device)
+    joint_ids = env._smp_joint_indexes
+
+    root_pos_w = _data_attr(data, "root_link_pos_w", "root_pos_w")
+    root_height = root_pos_w[:, 2] - env.scene.env_origins[:, 2]
+    root_lin_vel_xy = _root_lin_vel_w(data)[:, :2]
+    root_ang_vel = _root_ang_vel_w(data)
+    joint_err = data.joint_pos[:, joint_ids] - data.default_joint_pos[:, joint_ids]
+    joint_vel = data.joint_vel[:, joint_ids]
+    action = env.action_manager.action
+
+    height = torch.exp(-((root_height - target_height) / height_std) ** 2)
+    pose = torch.exp(-torch.mean((joint_err / joint_std) ** 2, dim=-1))
+    upright = torch.exp(-upright_scale * torch.sum(data.projected_gravity_b[:, :2] ** 2, dim=-1))
+    lin_quiet = torch.exp(-lin_vel_scale * torch.sum(root_lin_vel_xy**2, dim=-1))
+    ang_quiet = torch.exp(-ang_vel_scale * torch.sum(root_ang_vel**2, dim=-1))
+    joint_quiet = torch.exp(-joint_vel_scale * torch.mean(joint_vel**2, dim=-1))
+    action_regularization = torch.exp(-action_scale * torch.mean(action**2, dim=-1))
+
+    return (
+        0.25 * height
+        + 0.30 * pose
+        + 0.20 * upright
+        + 0.10 * lin_quiet
+        + 0.05 * ang_quiet
+        + 0.05 * joint_quiet
+        + 0.05 * action_regularization
+    )
 
 
 def forward_task_smp_product(
@@ -293,7 +361,7 @@ def steering_modified_task_smp_product(
     root_speed_sq = torch.sum(root_vel_xy**2, dim=-1)
     joint_vel_sq = torch.mean(asset.data.joint_vel[:, joint_ids] ** 2, dim=-1)
     action_sq = torch.mean(env.action_manager.action**2, dim=-1)
-    deadzone_extra = deadzone_stand_weight * standing_still_reward(env)
+    deadzone_extra = deadzone_stand_weight * standing_pose_reward(env)
     deadzone_extra = deadzone_extra - deadzone_lin_vel_penalty_weight * root_speed_sq
     deadzone_extra = deadzone_extra - deadzone_joint_vel_penalty_weight * joint_vel_sq
     deadzone_extra = deadzone_extra - deadzone_action_penalty_weight * action_sq
@@ -346,7 +414,7 @@ def steering_modified_stand_branch_reward(
     root_speed_sq = torch.sum(root_vel_xy**2, dim=-1)
     joint_vel_sq = torch.mean(asset.data.joint_vel[:, joint_ids] ** 2, dim=-1)
     action_sq = torch.mean(env.action_manager.action**2, dim=-1)
-    stand = deadzone_stand_weight * standing_still_reward(env)
+    stand = deadzone_stand_weight * standing_pose_reward(env)
     stand = stand - deadzone_lin_vel_penalty_weight * root_speed_sq
     stand = stand - deadzone_joint_vel_penalty_weight * joint_vel_sq
     stand = stand - deadzone_action_penalty_weight * action_sq
@@ -398,7 +466,7 @@ def steering_doubleprior_task_reward(
     root_speed_sq = torch.sum(root_vel_xy**2, dim=-1)
     joint_vel_sq = torch.mean(asset.data.joint_vel[:, joint_ids] ** 2, dim=-1)
     action_sq = torch.mean(env.action_manager.action**2, dim=-1)
-    stand_task = deadzone_stand_weight * standing_still_reward(env)
+    stand_task = deadzone_stand_weight * standing_pose_reward(env)
     stand_task = stand_task - deadzone_lin_vel_penalty_weight * root_speed_sq
     stand_task = stand_task - deadzone_joint_vel_penalty_weight * joint_vel_sq
     stand_task = stand_task - deadzone_action_penalty_weight * action_sq
