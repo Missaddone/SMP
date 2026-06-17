@@ -3,6 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+from isaaclab.managers import CommandTermCfg as CmdTerm
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.utils import configclass
@@ -10,12 +11,37 @@ from isaaclab.utils import configclass
 from . import mdp
 from .smp_env_cfg import PRETRAIN_CKPT_DIR, RewardsCfg
 from .steering_env_cfg import SteeringEventCfg, SteeringModifiedCommandsCfg, SmpG1SteeringEnvCfg
+from .smp_env_cfg import CommandsCfg, EventCfg, PRETRAIN_CKPT_DIR, RewardsCfg
 
 
 ################################################################################
 # Steering double-prior MDP components
 ################################################################################
 
+################################################################################
+# Steering MDP components
+################################################################################
+
+
+########################################
+# Commands
+########################################
+
+
+@configclass
+class SteeringDoublePriorCommandsCfg(CommandsCfg):
+    """Command config used by Smp-G1-Steering-modified-v0."""
+
+    steering: CmdTerm = mdp.SteeringCommandCfg(
+        asset_name="robot",
+        resampling_time_range=(3.0, 8.0),
+        rand_tar_dir=True,
+        rand_face_dir=False,
+        tar_speed_min=-0.5,
+        tar_speed_max=5.0,
+        speed_deadzone=0.1,
+        deadzone_sample_prob=0.4,
+    )
 
 ########################################
 # Events
@@ -33,7 +59,7 @@ class SteeringDoublePriorEventCfg(SteeringEventCfg):
             "moving_ckpt_path": str(PRETRAIN_CKPT_DIR / "pretrained_lafan_run.pt"),
             # EN: Replace this with a dedicated standing prior when available.
             # 中文：如果后面有专门的 stand prior，把这里替换成对应 checkpoint。
-            "stand_ckpt_path": str(PRETRAIN_CKPT_DIR / "checkpoint_01999.pt"),
+            "stand_ckpt_path": str(PRETRAIN_CKPT_DIR / "pretrained_jushen_stand.pt"),
             "gsi_buffer_size": 4096,
             "gsi_batch_size": 1024,
         },
@@ -83,6 +109,6 @@ class SteeringDoublePriorRewardsCfg(RewardsCfg):
 class SmpG1SteeringDoublePriorEnvCfg(SmpG1SteeringEnvCfg):
     """Random steering task with separate moving and standing SMP priors."""
 
-    commands: SteeringModifiedCommandsCfg = SteeringModifiedCommandsCfg()
+    commands: SteeringDoublePriorCommandsCfg = SteeringDoublePriorCommandsCfg()
     events: SteeringDoublePriorEventCfg = SteeringDoublePriorEventCfg()
     rewards: SteeringDoublePriorRewardsCfg = SteeringDoublePriorRewardsCfg()
