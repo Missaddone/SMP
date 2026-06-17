@@ -52,9 +52,6 @@ STANDING_JOINT_TARGET: tuple[float, ...] = (
     0.0,
     0.0,
 )
-STANDING_LEG_JOINT_IDS: tuple[int, ...] = tuple(range(12))
-STANDING_WAIST_JOINT_IDS: tuple[int, ...] = (12, 13, 14)
-STANDING_ARM_JOINT_IDS: tuple[int, ...] = tuple(range(15, NUM_JOINTS))
 
 
 def joint_pos_target_l2(env: ManagerBasedRLEnv, target: float, asset_cfg: SceneEntityCfg) -> torch.Tensor:
@@ -268,9 +265,7 @@ def standing_pose_reward(
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     target_height: float = 0.79,
     height_std: float = 0.08,
-    leg_std: float = 0.12,
-    waist_std: float = 0.08,
-    arm_std: float = 0.22,
+    joint_std: float = 0.14,
     upright_scale: float = 8.0,
     lin_vel_scale: float = 4.0,
     ang_vel_scale: float = 1.0,
@@ -281,13 +276,12 @@ def standing_pose_reward(
 
     EN: This is the new standing reward. Compared with
     ``old_standing_pose_reward``, it adds an explicit root-height target and
-    tracks a light-knee standing target instead of ``default_joint_pos``. Legs,
-    waist, and arms are scored separately so waist drift cannot be hidden by a
-    reasonable average full-body joint error.
+    tracks a light-knee standing target instead of ``default_joint_pos``. All
+    target joints use the same error scale and one unified pose reward.
 
     中文：这是新版站立奖励。相比 ``old_standing_pose_reward``，它显式约束
     root 高度，并追踪显式轻微屈膝站姿，而不是机器人默认屈膝初始姿态。
-    腿、腰、上肢分组计算，避免腰部漂移被全身平均误差掩盖。
+    所有关节使用同一个误差尺度和统一的 pose reward。
     """
     asset: Articulation = env.scene[asset_cfg.name]
     data = asset.data
@@ -308,9 +302,7 @@ def standing_pose_reward(
     action = env.action_manager.action
 
     height = torch.exp(-((root_height - target_height) / height_std) ** 2)
-    leg_pose = torch.exp(-torch.mean((joint_err[:, STANDING_LEG_JOINT_IDS] / leg_std) ** 2, dim=-1))
-    waist_pose = torch.exp(-torch.mean((joint_err[:, STANDING_WAIST_JOINT_IDS] / waist_std) ** 2, dim=-1))
-    arm_pose = torch.exp(-torch.mean((joint_err[:, STANDING_ARM_JOINT_IDS] / arm_std) ** 2, dim=-1))
+    pose = torch.exp(-torch.mean((joint_err / joint_std) ** 2, dim=-1))
     upright = torch.exp(-upright_scale * torch.sum(data.projected_gravity_b[:, :2] ** 2, dim=-1))
     lin_quiet = torch.exp(-lin_vel_scale * torch.sum(root_lin_vel_xy**2, dim=-1))
     ang_quiet = torch.exp(-ang_vel_scale * torch.sum(root_ang_vel**2, dim=-1))
@@ -319,9 +311,7 @@ def standing_pose_reward(
 
     return (
         0.20 * height
-        + 0.30 * leg_pose
-        + 0.20 * waist_pose
-        + 0.10 * arm_pose
+        + 0.60 * pose
         + 0.20 * upright
         + 0.08 * lin_quiet
         + 0.05 * ang_quiet
@@ -451,15 +441,14 @@ def steering_modified_stand_branch_reward(
 
     EN: For commands outside ``speed_deadzone``, keep the original steering
     layout ``(velocity_weight * velocity + face_weight * face) * SMP``. For
-    commands inside ``speed_deadzone``, keep the same velocity-tracking term
-    but drop the face reward. The stand branch then adds explicit standing pose
-    reward and penalties for root xy velocity, joint velocity, and action
-    magnitude.
+    commands inside ``speed_deadzone``, keep the same velocity and face terms.
+    The stand branch then adds explicit standing pose reward and penalties for
+    root xy velocity, joint velocity, and action magnitude.
 
     中文：速度命令在死区外时，仍然使用原 steering 的
     ``(velocity_weight * velocity + face_weight * face) * SMP``。速度命令在
-    死区内时，保留同一套速度跟踪项，但不使用 face reward；随后叠加站姿
-    奖励，并显式惩罚 root 水平速度、关节速度和 action 幅值。
+    死区内时，保留同一套速度和 face reward；随后叠加站姿奖励，并显式惩罚
+    root 水平速度、关节速度和 action 幅值。
     """
     moving_mask = _command_moving_mask(env, command_name)
     velocity = steering_target_velocity(env, command_name=command_name, vel_err_scale=vel_err_scale)
@@ -478,7 +467,7 @@ def steering_modified_stand_branch_reward(
     root_speed_sq = torch.sum(root_vel_xy**2, dim=-1)
     joint_vel_sq = torch.mean(asset.data.joint_vel[:, joint_ids] ** 2, dim=-1)
     action_sq = torch.mean(env.action_manager.action**2, dim=-1)
-    stand = velocity_weight * velocity + deadzone_stand_weight * standing_pose_reward(env)
+    stand = velocity_weight * velocity + face_weight * face + deadzone_stand_weight * standing_pose_reward(env)
     stand = stand - deadzone_lin_vel_penalty_weight * root_speed_sq
     stand = stand - deadzone_joint_vel_penalty_weight * joint_vel_sq
     stand = stand - deadzone_action_penalty_weight * action_sq
@@ -508,12 +497,12 @@ def steering_doubleprior_task_reward(
     """Steering reward with separate moving and standing SMP priors.
 
     EN: Moving commands use velocity plus face rewards with the locomotion
-    prior. Deadzone commands keep velocity tracking, drop the face reward, and
-    multiply the standing task reward by the standing prior. GSI still comes
-    from the moving prior.
+    prior. Deadzone commands keep velocity plus face rewards and multiply the
+    standing task reward by the standing prior. GSI still comes from the moving
+    prior.
     中文：运动命令使用速度和 face reward，并乘 locomotion prior；死区命令
-    保留速度跟踪，但去掉 face reward，然后把站立任务奖励乘 standing prior。
-    GSI 仍由 moving prior 负责。
+    同样保留速度和 face reward，然后把站立任务奖励乘 standing prior。GSI
+    仍由 moving prior 负责。
     """
     moving_mask = _command_moving_mask(env, command_name)
     velocity = steering_target_velocity(env, command_name=command_name, vel_err_scale=vel_err_scale)
@@ -532,7 +521,7 @@ def steering_doubleprior_task_reward(
     root_speed_sq = torch.sum(root_vel_xy**2, dim=-1)
     joint_vel_sq = torch.mean(asset.data.joint_vel[:, joint_ids] ** 2, dim=-1)
     action_sq = torch.mean(env.action_manager.action**2, dim=-1)
-    stand_task = velocity_weight * velocity + deadzone_stand_weight * standing_pose_reward(env)
+    stand_task = velocity_weight * velocity + face_weight * face + deadzone_stand_weight * standing_pose_reward(env)
     stand_task = stand_task - deadzone_lin_vel_penalty_weight * root_speed_sq
     stand_task = stand_task - deadzone_joint_vel_penalty_weight * joint_vel_sq
     stand_task = stand_task - deadzone_action_penalty_weight * action_sq
