@@ -49,7 +49,8 @@ class SteeringModifiedCommandsCfg(CommandsCfg):
         rand_face_dir=False,
         tar_speed_min=-0.5,
         tar_speed_max=0.1,
-        speed_deadzone=0.1,
+        speed_deadzone_min=-0.1,
+        speed_deadzone_max=0.1,
         deadzone_sample_prob=0.4,
     )
 

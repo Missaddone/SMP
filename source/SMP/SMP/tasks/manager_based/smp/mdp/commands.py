@@ -27,6 +27,19 @@ def _dir_world_to_local(direction_w: torch.Tensor, heading_w: torch.Tensor) -> t
     return torch.stack([cos_h * x_w + sin_h * y_w, -sin_h * x_w + cos_h * y_w], dim=-1)
 
 
+def _deadzone_bounds(cfg: "SteeringCommandCfg") -> tuple[float, float]:
+    lower = cfg.speed_deadzone_min
+    upper = cfg.speed_deadzone_max
+    if lower is None and upper is None:
+        lower = cfg.tar_speed_min
+        upper = cfg.speed_deadzone
+    elif lower is None:
+        lower = cfg.tar_speed_min
+    elif upper is None:
+        upper = cfg.speed_deadzone
+    return lower, upper
+
+
 class SteeringCommand(CommandTerm):
     """Periodic target xy velocity and facing direction command."""
 
@@ -66,19 +79,44 @@ class SteeringCommand(CommandTerm):
             theta = torch.zeros(num_envs, device=self.device)
         self.tar_dir_w[env_ids, 0] = torch.cos(theta)
         self.tar_dir_w[env_ids, 1] = torch.sin(theta)
-        if self.cfg.deadzone_sample_prob > 0.0 and self.cfg.speed_deadzone > self.cfg.tar_speed_min:
+        deadzone_min, deadzone_max = _deadzone_bounds(self.cfg)
+        deadzone_min = max(deadzone_min, self.cfg.tar_speed_min)
+        deadzone_max = min(deadzone_max, self.cfg.tar_speed_max)
+        has_deadzone = deadzone_max > deadzone_min
+        if self.cfg.deadzone_sample_prob > 0.0 and has_deadzone:
             deadzone_mask = torch.rand(num_envs, device=self.device) < self.cfg.deadzone_sample_prob
             speeds = torch.empty(num_envs, device=self.device)
             if deadzone_mask.any():
                 speeds[deadzone_mask] = torch.empty(int(deadzone_mask.sum()), device=self.device).uniform_(
-                    self.cfg.tar_speed_min,
-                    self.cfg.speed_deadzone,
+                    deadzone_min,
+                    deadzone_max,
                 )
             if (~deadzone_mask).any():
-                speeds[~deadzone_mask] = torch.empty(int((~deadzone_mask).sum()), device=self.device).uniform_(
-                    max(self.cfg.speed_deadzone, self.cfg.tar_speed_min),
-                    self.cfg.tar_speed_max,
-                )
+                moving_count = int((~deadzone_mask).sum())
+                moving_speeds = torch.empty(moving_count, device=self.device)
+                lower_len = max(deadzone_min - self.cfg.tar_speed_min, 0.0)
+                upper_len = max(self.cfg.tar_speed_max - deadzone_max, 0.0)
+                if lower_len == 0.0 and upper_len == 0.0:
+                    moving_speeds.uniform_(deadzone_min, deadzone_max)
+                elif lower_len > 0.0 and upper_len > 0.0:
+                    lower_mask = torch.rand(moving_count, device=self.device) < lower_len / (lower_len + upper_len)
+                    if lower_mask.any():
+                        moving_speeds[lower_mask] = torch.empty(int(lower_mask.sum()), device=self.device).uniform_(
+                            self.cfg.tar_speed_min,
+                            deadzone_min,
+                        )
+                    if (~lower_mask).any():
+                        moving_speeds[~lower_mask] = torch.empty(
+                            int((~lower_mask).sum()), device=self.device
+                        ).uniform_(
+                            deadzone_max,
+                            self.cfg.tar_speed_max,
+                        )
+                elif lower_len > 0.0:
+                    moving_speeds.uniform_(self.cfg.tar_speed_min, deadzone_min)
+                else:
+                    moving_speeds.uniform_(deadzone_max, self.cfg.tar_speed_max)
+                speeds[~deadzone_mask] = moving_speeds
             self.tar_speed[env_ids] = speeds
         else:
             self.tar_speed[env_ids] = torch.empty(num_envs, device=self.device).uniform_(
@@ -149,7 +187,11 @@ class SteeringCommandCfg(CommandTermCfg):
     rand_face_dir: bool = True
     tar_speed_min: float = 0.5
     tar_speed_max: float = 3.0
+    # Legacy one-sided deadzone: [tar_speed_min, speed_deadzone).
     speed_deadzone: float = 0.0
+    # Optional explicit interval deadzone: [speed_deadzone_min, speed_deadzone_max].
+    speed_deadzone_min: float | None = None
+    speed_deadzone_max: float | None = None
     deadzone_sample_prob: float = 0.0
     viz_z_offset: float = 0.7
     viz_scale: float = 1.5

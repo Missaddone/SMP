@@ -192,8 +192,17 @@ def task_smp_product(
 def _command_moving_mask(env: ManagerBasedRLEnv, command_name: str) -> torch.Tensor:
     """Return True for envs whose effective reference speed is outside the deadzone."""
     command = env.command_manager.get_term(command_name)
-    speed_deadzone = getattr(command.cfg, "speed_deadzone", 0.0)
-    return command.tar_speed >= speed_deadzone
+    deadzone_min = getattr(command.cfg, "speed_deadzone_min", None)
+    deadzone_max = getattr(command.cfg, "speed_deadzone_max", None)
+    if deadzone_min is None and deadzone_max is None:
+        deadzone_min = getattr(command.cfg, "tar_speed_min", float("-inf"))
+        deadzone_max = getattr(command.cfg, "speed_deadzone", float("-inf"))
+    elif deadzone_min is None:
+        deadzone_min = getattr(command.cfg, "tar_speed_min", float("-inf"))
+    elif deadzone_max is None:
+        deadzone_max = getattr(command.cfg, "speed_deadzone", float("-inf"))
+    deadzone_mask = (command.tar_speed >= deadzone_min) & (command.tar_speed <= deadzone_max)
+    return ~deadzone_mask
 
 
 def _root_ang_vel_w(data) -> torch.Tensor:
@@ -438,18 +447,19 @@ def steering_modified_stand_branch_reward(
     ws: float = 6.0,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Use SMP style only for moving commands, and pure standing reward in the deadzone.
+    """Use SMP style only for moving commands, and standing reward in the deadzone.
 
     EN: For commands outside ``speed_deadzone``, keep the original steering
     layout ``(velocity_weight * velocity + face_weight * face) * SMP``. For
-    commands inside ``speed_deadzone``, do not use the SMP prior; instead use a
-    quiet-standing reward with explicit penalties for root xy velocity, joint
-    velocity, and action magnitude.
+    commands inside ``speed_deadzone``, keep the same velocity-tracking term
+    but drop the face reward. The stand branch then adds explicit standing pose
+    reward and penalties for root xy velocity, joint velocity, and action
+    magnitude.
 
     中文：速度命令在死区外时，仍然使用原 steering 的
     ``(velocity_weight * velocity + face_weight * face) * SMP``。速度命令在
-    死区内时，不使用 SMP prior，而是切换到站立静止奖励，并显式惩罚 root
-    水平速度、关节速度和 action 幅值。
+    死区内时，保留同一套速度跟踪项，但不使用 face reward；随后叠加站姿
+    奖励，并显式惩罚 root 水平速度、关节速度和 action 幅值。
     """
     moving_mask = _command_moving_mask(env, command_name)
     velocity = steering_target_velocity(env, command_name=command_name, vel_err_scale=vel_err_scale)
@@ -468,7 +478,7 @@ def steering_modified_stand_branch_reward(
     root_speed_sq = torch.sum(root_vel_xy**2, dim=-1)
     joint_vel_sq = torch.mean(asset.data.joint_vel[:, joint_ids] ** 2, dim=-1)
     action_sq = torch.mean(env.action_manager.action**2, dim=-1)
-    stand = deadzone_stand_weight * standing_pose_reward(env)
+    stand = velocity_weight * velocity + deadzone_stand_weight * standing_pose_reward(env)
     stand = stand - deadzone_lin_vel_penalty_weight * root_speed_sq
     stand = stand - deadzone_joint_vel_penalty_weight * joint_vel_sq
     stand = stand - deadzone_action_penalty_weight * action_sq
@@ -497,11 +507,13 @@ def steering_doubleprior_task_reward(
 ) -> torch.Tensor:
     """Steering reward with separate moving and standing SMP priors.
 
-    EN: Moving commands use the locomotion prior. Deadzone commands use a
-    standing task reward multiplied by the standing prior. GSI still comes from
-    the moving prior.
-    中文：运动命令使用 locomotion prior；死区命令使用站立任务奖励乘 standing
-    prior。GSI 仍由 moving prior 负责。
+    EN: Moving commands use velocity plus face rewards with the locomotion
+    prior. Deadzone commands keep velocity tracking, drop the face reward, and
+    multiply the standing task reward by the standing prior. GSI still comes
+    from the moving prior.
+    中文：运动命令使用速度和 face reward，并乘 locomotion prior；死区命令
+    保留速度跟踪，但去掉 face reward，然后把站立任务奖励乘 standing prior。
+    GSI 仍由 moving prior 负责。
     """
     moving_mask = _command_moving_mask(env, command_name)
     velocity = steering_target_velocity(env, command_name=command_name, vel_err_scale=vel_err_scale)
@@ -520,7 +532,7 @@ def steering_doubleprior_task_reward(
     root_speed_sq = torch.sum(root_vel_xy**2, dim=-1)
     joint_vel_sq = torch.mean(asset.data.joint_vel[:, joint_ids] ** 2, dim=-1)
     action_sq = torch.mean(env.action_manager.action**2, dim=-1)
-    stand_task = deadzone_stand_weight * standing_pose_reward(env)
+    stand_task = velocity_weight * velocity + deadzone_stand_weight * standing_pose_reward(env)
     stand_task = stand_task - deadzone_lin_vel_penalty_weight * root_speed_sq
     stand_task = stand_task - deadzone_joint_vel_penalty_weight * joint_vel_sq
     stand_task = stand_task - deadzone_action_penalty_weight * action_sq
@@ -632,15 +644,9 @@ def steering_target_velocity(
     asset: Articulation = env.scene[asset_cfg.name]
     command = env.command_manager.get_term(command_name)
     root_vel_xy = _root_lin_vel_w(asset.data)[:, :2]
-    speed_deadzone = getattr(command.cfg, "speed_deadzone", 0.0)
     # print("target_speed:", command.tar_speed)
     # print("root_speed:", torch.linalg.norm(root_vel_xy, dim=-1))
-    deadzone_speed_bias = -0.1
-    tar_speed = torch.where(
-        command.tar_speed < speed_deadzone,
-        torch.full_like(command.tar_speed, deadzone_speed_bias),
-        command.tar_speed,
-    )
+    tar_speed = command.tar_speed
     tar_vel = tar_speed.unsqueeze(-1) * command.tar_dir_w
     vel_err = ((tar_vel - root_vel_xy) ** 2).sum(dim=-1)
     proj_speed = (command.tar_dir_w * root_vel_xy).sum(dim=-1)
