@@ -20,6 +20,43 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 
+# Isaac Lab / Unitree-style light-knee standing pose, in G1_JOINT_NAMES order.
+STANDING_JOINT_TARGET: tuple[float, ...] = (
+    -0.10,
+    0.0,
+    0.0,
+    0.30,
+    -0.20,
+    0.0,
+    -0.10,
+    0.0,
+    0.0,
+    0.30,
+    -0.20,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.20,
+    0.15,
+    0.0,
+    0.60,
+    0.0,
+    0.0,
+    0.0,
+    0.20,
+    -0.15,
+    0.0,
+    0.60,
+    0.0,
+    0.0,
+    0.0,
+)
+STANDING_LEG_JOINT_IDS: tuple[int, ...] = tuple(range(12))
+STANDING_WAIST_JOINT_IDS: tuple[int, ...] = (12, 13, 14)
+STANDING_ARM_JOINT_IDS: tuple[int, ...] = tuple(range(15, NUM_JOINTS))
+
+
 def joint_pos_target_l2(env: ManagerBasedRLEnv, target: float, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     """Penalize joint position deviation from a target value."""
     # extract the used quantities (to enable type-hinting)
@@ -163,6 +200,15 @@ def _root_ang_vel_w(data) -> torch.Tensor:
     return data.root_link_ang_vel_w if hasattr(data, "root_link_ang_vel_w") else data.root_ang_vel_w
 
 
+def _standing_joint_target_tensor(env: ManagerBasedRLEnv, dtype: torch.dtype) -> torch.Tensor:
+    device = torch.device(env.device)
+    target = getattr(env, "_smp_standing_joint_target", None)
+    if target is None or target.device != device or target.dtype != dtype:
+        target = torch.tensor(STANDING_JOINT_TARGET, dtype=dtype, device=device)
+        env._smp_standing_joint_target = target
+    return target
+
+
 def old_standing_pose_reward(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
@@ -211,25 +257,28 @@ def standing_still_reward(env: ManagerBasedRLEnv, **kwargs) -> torch.Tensor:
 def standing_pose_reward(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    target_height: float = 0.76,
+    target_height: float = 0.79,
     height_std: float = 0.08,
-    joint_std: float = 0.12,
+    leg_std: float = 0.12,
+    waist_std: float = 0.08,
+    arm_std: float = 0.22,
     upright_scale: float = 8.0,
     lin_vel_scale: float = 4.0,
     ang_vel_scale: float = 1.0,
     joint_vel_scale: float = 0.05,
     action_scale: float = 0.1,
 ) -> torch.Tensor:
-    """Reward a strict default standing pose for low-speed/deadzone commands.
+    """Reward a strict explicit standing pose for low-speed/deadzone commands.
 
     EN: This is the new standing reward. Compared with
     ``old_standing_pose_reward``, it adds an explicit root-height target and
-    gives more weight to the default joint pose, so the policy is pushed toward
-    a real standing posture instead of any quiet low-motion posture.
+    tracks a light-knee standing target instead of ``default_joint_pos``. Legs,
+    waist, and arms are scored separately so waist drift cannot be hidden by a
+    reasonable average full-body joint error.
 
     中文：这是新版站立奖励。相比 ``old_standing_pose_reward``，它显式约束
-    root 高度，并提高默认关节姿态的权重，让策略更倾向于标准站姿，而不是
-    任意一种“低速不动”的奇怪姿态。
+    root 高度，并追踪显式轻微屈膝站姿，而不是机器人默认屈膝初始姿态。
+    腿、腰、上肢分组计算，避免腰部漂移被全身平均误差掩盖。
     """
     asset: Articulation = env.scene[asset_cfg.name]
     data = asset.data
@@ -244,12 +293,15 @@ def standing_pose_reward(
     root_height = root_pos_w[:, 2] - env.scene.env_origins[:, 2]
     root_lin_vel_xy = _root_lin_vel_w(data)[:, :2]
     root_ang_vel = _root_ang_vel_w(data)
-    joint_err = data.joint_pos[:, joint_ids] - data.default_joint_pos[:, joint_ids]
+    standing_target = _standing_joint_target_tensor(env, data.joint_pos.dtype)
+    joint_err = data.joint_pos[:, joint_ids] - standing_target
     joint_vel = data.joint_vel[:, joint_ids]
     action = env.action_manager.action
 
     height = torch.exp(-((root_height - target_height) / height_std) ** 2)
-    pose = torch.exp(-torch.mean((joint_err / joint_std) ** 2, dim=-1))
+    leg_pose = torch.exp(-torch.mean((joint_err[:, STANDING_LEG_JOINT_IDS] / leg_std) ** 2, dim=-1))
+    waist_pose = torch.exp(-torch.mean((joint_err[:, STANDING_WAIST_JOINT_IDS] / waist_std) ** 2, dim=-1))
+    arm_pose = torch.exp(-torch.mean((joint_err[:, STANDING_ARM_JOINT_IDS] / arm_std) ** 2, dim=-1))
     upright = torch.exp(-upright_scale * torch.sum(data.projected_gravity_b[:, :2] ** 2, dim=-1))
     lin_quiet = torch.exp(-lin_vel_scale * torch.sum(root_lin_vel_xy**2, dim=-1))
     ang_quiet = torch.exp(-ang_vel_scale * torch.sum(root_ang_vel**2, dim=-1))
@@ -257,13 +309,15 @@ def standing_pose_reward(
     action_regularization = torch.exp(-action_scale * torch.mean(action**2, dim=-1))
 
     return (
-        0.25 * height
-        + 0.30 * pose
+        0.20 * height
+        + 0.30 * leg_pose
+        + 0.20 * waist_pose
+        + 0.10 * arm_pose
         + 0.20 * upright
-        + 0.10 * lin_quiet
+        + 0.08 * lin_quiet
         + 0.05 * ang_quiet
-        + 0.05 * joint_quiet
-        + 0.05 * action_regularization
+        + 0.04 * joint_quiet
+        + 0.03 * action_regularization
     )
 
 
