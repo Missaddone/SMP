@@ -189,6 +189,13 @@ def task_smp_product(
 def _command_moving_mask(env: ManagerBasedRLEnv, command_name: str) -> torch.Tensor:
     """Return True for envs whose effective reference speed is outside the deadzone."""
     command = env.command_manager.get_term(command_name)
+    deadzone_min, deadzone_max = _command_deadzone_bounds(command)
+    deadzone_mask = (command.tar_speed >= deadzone_min) & (command.tar_speed <= deadzone_max)
+    return ~deadzone_mask
+
+
+def _command_deadzone_bounds(command) -> tuple[float, float]:
+    """Resolve legacy or interval deadzone bounds from a steering command term."""
     deadzone_min = getattr(command.cfg, "speed_deadzone_min", None)
     deadzone_max = getattr(command.cfg, "speed_deadzone_max", None)
     if deadzone_min is None and deadzone_max is None:
@@ -198,8 +205,7 @@ def _command_moving_mask(env: ManagerBasedRLEnv, command_name: str) -> torch.Ten
         deadzone_min = getattr(command.cfg, "tar_speed_min", float("-inf"))
     elif deadzone_max is None:
         deadzone_max = getattr(command.cfg, "speed_deadzone", float("-inf"))
-    deadzone_mask = (command.tar_speed >= deadzone_min) & (command.tar_speed <= deadzone_max)
-    return ~deadzone_mask
+    return deadzone_min, deadzone_max
 
 
 def _root_ang_vel_w(data) -> torch.Tensor:
@@ -265,7 +271,7 @@ def standing_pose_reward(
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     target_height: float = 0.79,
     height_std: float = 0.08,
-    joint_std: float = 0.14,
+    joint_std: float = 0.12,
     upright_scale: float = 8.0,
     lin_vel_scale: float = 4.0,
     ang_vel_scale: float = 1.0,
@@ -311,7 +317,7 @@ def standing_pose_reward(
 
     return (
         0.20 * height
-        + 0.60 * pose
+        + 1.50 * pose
         + 0.20 * upright
         + 0.08 * lin_quiet
         + 0.05 * ang_quiet
@@ -429,6 +435,7 @@ def steering_modified_stand_branch_reward(
     vel_err_scale: float = 1.0,
     velocity_weight: float = 1.0,
     face_weight: float = 0.5,
+    deadzone_face_weight: float = 0.0,
     deadzone_stand_weight: float = 0.5,
     deadzone_lin_vel_penalty_weight: float = 2.0,
     deadzone_joint_vel_penalty_weight: float = 0.05,
@@ -441,14 +448,15 @@ def steering_modified_stand_branch_reward(
 
     EN: For commands outside ``speed_deadzone``, keep the original steering
     layout ``(velocity_weight * velocity + face_weight * face) * SMP``. For
-    commands inside ``speed_deadzone``, keep the same velocity and face terms.
-    The stand branch then adds explicit standing pose reward and penalties for
-    root xy velocity, joint velocity, and action magnitude.
+    commands inside ``speed_deadzone``, keep velocity tracking but use a
+    separate face weight, which defaults to zero for pure standing. The stand
+    branch then adds explicit standing pose reward and penalties for root xy
+    velocity, joint velocity, and action magnitude.
 
     中文：速度命令在死区外时，仍然使用原 steering 的
     ``(velocity_weight * velocity + face_weight * face) * SMP``。速度命令在
-    死区内时，保留同一套速度和 face reward；随后叠加站姿奖励，并显式惩罚
-    root 水平速度、关节速度和 action 幅值。
+    死区内时，保留速度跟踪，但使用单独的 face 权重，默认纯站立时为 0；
+    随后叠加站姿奖励，并显式惩罚 root 水平速度、关节速度和 action 幅值。
     """
     moving_mask = _command_moving_mask(env, command_name)
     velocity = steering_target_velocity(env, command_name=command_name, vel_err_scale=vel_err_scale)
@@ -467,7 +475,11 @@ def steering_modified_stand_branch_reward(
     root_speed_sq = torch.sum(root_vel_xy**2, dim=-1)
     joint_vel_sq = torch.mean(asset.data.joint_vel[:, joint_ids] ** 2, dim=-1)
     action_sq = torch.mean(env.action_manager.action**2, dim=-1)
-    stand = velocity_weight * velocity + face_weight * face + deadzone_stand_weight * standing_pose_reward(env)
+    stand = (
+        velocity_weight * velocity
+        + deadzone_face_weight * face
+        + deadzone_stand_weight * standing_pose_reward(env)
+    )
     stand = stand - deadzone_lin_vel_penalty_weight * root_speed_sq
     stand = stand - deadzone_joint_vel_penalty_weight * joint_vel_sq
     stand = stand - deadzone_action_penalty_weight * action_sq
@@ -483,6 +495,7 @@ def steering_doubleprior_task_reward(
     vel_err_scale: float = 1.0,
     velocity_weight: float = 1.0,
     face_weight: float = 0.5,
+    deadzone_face_weight: float = 0.0,
     deadzone_stand_weight: float = 0.5,
     deadzone_lin_vel_penalty_weight: float = 2.0,
     deadzone_joint_vel_penalty_weight: float = 0.05,
@@ -497,12 +510,12 @@ def steering_doubleprior_task_reward(
     """Steering reward with separate moving and standing SMP priors.
 
     EN: Moving commands use velocity plus face rewards with the locomotion
-    prior. Deadzone commands keep velocity plus face rewards and multiply the
-    standing task reward by the standing prior. GSI still comes from the moving
-    prior.
+    prior. Deadzone commands keep velocity tracking, use a separate face weight
+    that defaults to zero, and multiply the standing task reward by the
+    standing prior. GSI still comes from the moving prior.
     中文：运动命令使用速度和 face reward，并乘 locomotion prior；死区命令
-    同样保留速度和 face reward，然后把站立任务奖励乘 standing prior。GSI
-    仍由 moving prior 负责。
+    保留速度跟踪，但使用单独的 face 权重，默认纯站立时为 0，然后把站立任务
+    奖励乘 standing prior。GSI 仍由 moving prior 负责。
     """
     moving_mask = _command_moving_mask(env, command_name)
     velocity = steering_target_velocity(env, command_name=command_name, vel_err_scale=vel_err_scale)
@@ -521,7 +534,11 @@ def steering_doubleprior_task_reward(
     root_speed_sq = torch.sum(root_vel_xy**2, dim=-1)
     joint_vel_sq = torch.mean(asset.data.joint_vel[:, joint_ids] ** 2, dim=-1)
     action_sq = torch.mean(env.action_manager.action**2, dim=-1)
-    stand_task = velocity_weight * velocity + face_weight * face + deadzone_stand_weight * standing_pose_reward(env)
+    stand_task = (
+        velocity_weight * velocity
+        + deadzone_face_weight * face
+        + deadzone_stand_weight * standing_pose_reward(env)
+    )
     stand_task = stand_task - deadzone_lin_vel_penalty_weight * root_speed_sq
     stand_task = stand_task - deadzone_joint_vel_penalty_weight * joint_vel_sq
     stand_task = stand_task - deadzone_action_penalty_weight * action_sq
@@ -635,7 +652,9 @@ def steering_target_velocity(
     root_vel_xy = _root_lin_vel_w(asset.data)[:, :2]
     # print("target_speed:", command.tar_speed)
     # print("root_speed:", torch.linalg.norm(root_vel_xy, dim=-1))
-    tar_speed = command.tar_speed
+    deadzone_min, deadzone_max = _command_deadzone_bounds(command)
+    deadzone_mask = (command.tar_speed >= deadzone_min) & (command.tar_speed <= deadzone_max)
+    tar_speed = torch.where(deadzone_mask, torch.zeros_like(command.tar_speed), command.tar_speed)
     tar_vel = tar_speed.unsqueeze(-1) * command.tar_dir_w
     vel_err = ((tar_vel - root_vel_xy) ** 2).sum(dim=-1)
     proj_speed = (command.tar_dir_w * root_vel_xy).sum(dim=-1)
