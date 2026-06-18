@@ -47,11 +47,12 @@ class SteeringModifiedCommandsCfg(CommandsCfg):
         resampling_time_range=(3.0, 8.0),
         rand_tar_dir=True,
         rand_face_dir=False,
-        tar_speed_min=-0.5,
-        tar_speed_max=4.0,
-        speed_deadzone_min=-0.1,
-        speed_deadzone_max=0.1,
-        deadzone_sample_prob=0.2,
+        tar_speed_min=0.0,
+        tar_speed_max=5.0,
+        stand_sample_prob=0.3,
+        stand_speed=0.0,
+        run_speed_min=0.8,
+        run_speed_max=5.0,
     )
 
 

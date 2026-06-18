@@ -187,11 +187,23 @@ def task_smp_product(
 
 
 def _command_moving_mask(env: ManagerBasedRLEnv, command_name: str) -> torch.Tensor:
-    """Return True for envs whose effective reference speed is outside the deadzone."""
+    """Return True for envs whose command is a locomotion command."""
     command = env.command_manager.get_term(command_name)
+    return ~_command_standing_mask(command)
+
+
+def _command_standing_mask(command) -> torch.Tensor:
+    """Return True for commands that should use the standing branch."""
+    run_speed_min = getattr(command.cfg, "run_speed_min", None)
+    run_speed_max = getattr(command.cfg, "run_speed_max", None)
+    if getattr(command.cfg, "stand_sample_prob", 0.0) > 0.0 and run_speed_min is not None and run_speed_max is not None:
+        stand_speed = getattr(command.cfg, "stand_speed", 0.0)
+        tolerance = getattr(command.cfg, "stand_speed_tolerance", 1e-4)
+        return torch.abs(command.tar_speed - stand_speed) <= tolerance
+
     deadzone_min, deadzone_max = _command_deadzone_bounds(command)
     deadzone_mask = (command.tar_speed >= deadzone_min) & (command.tar_speed <= deadzone_max)
-    return ~deadzone_mask
+    return deadzone_mask
 
 
 def _command_deadzone_bounds(command) -> tuple[float, float]:
@@ -652,9 +664,8 @@ def steering_target_velocity(
     root_vel_xy = _root_lin_vel_w(asset.data)[:, :2]
     # print("target_speed:", command.tar_speed)
     # print("root_speed:", torch.linalg.norm(root_vel_xy, dim=-1))
-    deadzone_min, deadzone_max = _command_deadzone_bounds(command)
-    deadzone_mask = (command.tar_speed >= deadzone_min) & (command.tar_speed <= deadzone_max)
-    tar_speed = torch.where(deadzone_mask, torch.zeros_like(command.tar_speed), command.tar_speed)
+    standing_mask = _command_standing_mask(command)
+    tar_speed = torch.where(standing_mask, torch.zeros_like(command.tar_speed), command.tar_speed)
     tar_vel = tar_speed.unsqueeze(-1) * command.tar_dir_w
     vel_err = ((tar_vel - root_vel_xy) ** 2).sum(dim=-1)
     proj_speed = (command.tar_dir_w * root_vel_xy).sum(dim=-1)
