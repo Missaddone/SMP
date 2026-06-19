@@ -42,6 +42,7 @@ simulation_app = app_launcher.app
 
 import gymnasium as gym
 import torch
+from torch.utils.tensorboard import SummaryWriter
 from rsl_rl.runners import OnPolicyRunner
 
 from isaaclab.envs import (
@@ -133,6 +134,15 @@ def _teacher_1_mask_from_selector(selector_obs: torch.Tensor, agent_cfg: RslRlBa
     raise ValueError(f"Unsupported selector_mode: {selector_mode}")
 
 
+def _timeout_tensor_from_extras(extras: dict, dones: torch.Tensor) -> torch.Tensor:
+    """Best-effort timeout extraction across Isaac Lab/RSL-RL wrapper versions."""
+    for key in ("time_outs", "timeouts", "time_out", "timeout"):
+        value = extras.get(key)
+        if value is not None:
+            return value.to(device=dones.device, dtype=torch.bool).view_as(dones)
+    return torch.zeros_like(dones, dtype=torch.bool)
+
+
 def _save_student_checkpoint(
     path: str,
     student: torch.nn.Module,
@@ -175,6 +185,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     log_dir = os.path.join(log_root_path, log_dir)
     os.makedirs(os.path.join(log_dir, "params"), exist_ok=True)
     os.makedirs(os.path.join(log_dir, "checkpoints"), exist_ok=True)
+    writer = SummaryWriter(log_dir=log_dir)
     print(f"[INFO] Logging dual distillation in directory: {log_dir}")
 
     if isinstance(env_cfg, ManagerBasedRLEnvCfg):
@@ -215,59 +226,95 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
 
     obs = env.get_observations()
+    episode_lengths = torch.zeros(env.num_envs, device=agent_cfg.device)
     start_time = time.time()
     last_loss = 0.0
     last_teacher_1_frac = 0.0
 
-    for iteration in range(agent_cfg.max_iterations):
-        mean_loss = 0.0
-        mean_teacher_1_frac = 0.0
-        for _ in range(agent_cfg.num_steps_per_env):
-            student.train()
-            update_normalization = getattr(student, "update_normalization", None)
-            if update_normalization is not None:
-                update_normalization(obs)
+    try:
+        for iteration in range(agent_cfg.max_iterations):
+            mean_loss = 0.0
+            mean_teacher_1_frac = 0.0
+            mean_done_frac = 0.0
+            mean_timeout_frac = 0.0
+            mean_command_speed = 0.0
+            finished_lengths = []
+            for _ in range(agent_cfg.num_steps_per_env):
+                student.train()
+                update_normalization = getattr(student, "update_normalization", None)
+                if update_normalization is not None:
+                    update_normalization(obs)
 
-            student_actions = _call_policy(student, obs)
-            with torch.no_grad():
-                teacher_0_actions = _call_policy(teacher_0, obs)
-                teacher_1_actions = _call_policy(teacher_1, obs)
+                student_actions = _call_policy(student, obs)
+                with torch.no_grad():
+                    teacher_0_actions = _call_policy(teacher_0, obs)
+                    teacher_1_actions = _call_policy(teacher_1, obs)
 
-            selector_obs = obs[agent_cfg.selector_obs_group]
-            teacher_1_mask = _teacher_1_mask_from_selector(selector_obs, agent_cfg)
-            target_actions = torch.where(teacher_1_mask.unsqueeze(-1), teacher_1_actions, teacher_0_actions)
-            loss = torch.nn.functional.mse_loss(student_actions, target_actions)
+                selector_obs = obs[agent_cfg.selector_obs_group]
+                command_speed = torch.linalg.norm(selector_obs[:, 0:2], dim=-1)
+                teacher_1_mask = _teacher_1_mask_from_selector(selector_obs, agent_cfg)
+                target_actions = torch.where(teacher_1_mask.unsqueeze(-1), teacher_1_actions, teacher_0_actions)
+                loss = torch.nn.functional.mse_loss(student_actions, target_actions)
 
-            optimizer.zero_grad()
-            loss.backward()
-            if agent_cfg.max_grad_norm is not None:
-                torch.nn.utils.clip_grad_norm_(student.parameters(), agent_cfg.max_grad_norm)
-            optimizer.step()
+                optimizer.zero_grad()
+                loss.backward()
+                if agent_cfg.max_grad_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(student.parameters(), agent_cfg.max_grad_norm)
+                optimizer.step()
 
-            with torch.no_grad():
-                obs, _, _, _ = env.step(student_actions.detach())
+                with torch.no_grad():
+                    obs, _, dones, extras = env.step(student_actions.detach())
 
-            mean_loss += loss.item()
-            mean_teacher_1_frac += teacher_1_mask.float().mean().item()
+                dones = dones.to(device=agent_cfg.device, dtype=torch.bool)
+                timeouts = _timeout_tensor_from_extras(extras, dones)
+                episode_lengths += 1
+                if dones.any():
+                    finished_lengths.append(episode_lengths[dones].detach())
+                    episode_lengths[dones] = 0
 
-        last_loss = mean_loss / agent_cfg.num_steps_per_env
-        last_teacher_1_frac = mean_teacher_1_frac / agent_cfg.num_steps_per_env
-        if iteration % 10 == 0:
-            print(
-                f"[INFO] Iteration {iteration:05d} | loss={last_loss:.6f} "
-                f"| teacher_1_frac={last_teacher_1_frac:.3f}"
-            )
-        if iteration % agent_cfg.save_interval == 0 or iteration == agent_cfg.max_iterations - 1:
-            checkpoint_path = os.path.join(log_dir, "checkpoints", f"model_{iteration:05d}.pt")
-            _save_student_checkpoint(checkpoint_path, student, optimizer, iteration)
+                mean_loss += loss.item()
+                mean_teacher_1_frac += teacher_1_mask.float().mean().item()
+                mean_done_frac += dones.float().mean().item()
+                mean_timeout_frac += timeouts.float().mean().item()
+                mean_command_speed += command_speed.mean().item()
 
-    final_path = os.path.join(log_dir, "model_final.pt")
-    _save_student_checkpoint(final_path, student, optimizer, agent_cfg.max_iterations)
-    print(
-        f"[INFO] Finished dual distillation in {round(time.time() - start_time, 2)}s "
-        f"| final_loss={last_loss:.6f} | teacher_1_frac={last_teacher_1_frac:.3f}"
-    )
-    env.close()
+            last_loss = mean_loss / agent_cfg.num_steps_per_env
+            last_teacher_1_frac = mean_teacher_1_frac / agent_cfg.num_steps_per_env
+            done_frac = mean_done_frac / agent_cfg.num_steps_per_env
+            timeout_frac = mean_timeout_frac / agent_cfg.num_steps_per_env
+            command_speed = mean_command_speed / agent_cfg.num_steps_per_env
+            if finished_lengths:
+                mean_episode_length = torch.cat(finished_lengths).float().mean().item()
+            else:
+                mean_episode_length = episode_lengths.mean().item()
+
+            writer.add_scalar("distill/loss", last_loss, iteration)
+            writer.add_scalar("distill/teacher_1_frac", last_teacher_1_frac, iteration)
+            writer.add_scalar("env/done_frac", done_frac, iteration)
+            writer.add_scalar("env/timeout_frac", timeout_frac, iteration)
+            writer.add_scalar("env/mean_episode_length", mean_episode_length, iteration)
+            writer.add_scalar("command/mean_speed", command_speed, iteration)
+            writer.add_scalar("train/learning_rate", agent_cfg.algorithm.learning_rate, iteration)
+
+            if iteration % 10 == 0:
+                print(
+                    f"[INFO] Iteration {iteration:05d} | loss={last_loss:.6f} "
+                    f"| teacher_1_frac={last_teacher_1_frac:.3f} "
+                    f"| done_frac={done_frac:.3f} | ep_len={mean_episode_length:.1f}"
+                )
+            if iteration % agent_cfg.save_interval == 0 or iteration == agent_cfg.max_iterations - 1:
+                checkpoint_path = os.path.join(log_dir, "checkpoints", f"model_{iteration:05d}.pt")
+                _save_student_checkpoint(checkpoint_path, student, optimizer, iteration)
+
+        final_path = os.path.join(log_dir, "model_final.pt")
+        _save_student_checkpoint(final_path, student, optimizer, agent_cfg.max_iterations)
+        print(
+            f"[INFO] Finished dual distillation in {round(time.time() - start_time, 2)}s "
+            f"| final_loss={last_loss:.6f} | teacher_1_frac={last_teacher_1_frac:.3f}"
+        )
+    finally:
+        writer.close()
+        env.close()
 
 
 if __name__ == "__main__":
