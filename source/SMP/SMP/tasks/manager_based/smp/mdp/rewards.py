@@ -224,6 +224,28 @@ def _root_ang_vel_w(data) -> torch.Tensor:
     return data.root_link_ang_vel_w if hasattr(data, "root_link_ang_vel_w") else data.root_ang_vel_w
 
 
+def _root_lin_vel_b(data) -> torch.Tensor:
+    if hasattr(data, "root_link_lin_vel_b"):
+        return data.root_link_lin_vel_b
+    if hasattr(data, "root_lin_vel_b"):
+        return data.root_lin_vel_b
+    root_lin_vel_w = _root_lin_vel_w(data)
+    heading_w = _heading_w(data)
+    cos_h = torch.cos(heading_w)
+    sin_h = torch.sin(heading_w)
+    x_w, y_w = root_lin_vel_w[:, 0], root_lin_vel_w[:, 1]
+    xy_b = torch.stack([cos_h * x_w + sin_h * y_w, -sin_h * x_w + cos_h * y_w], dim=-1)
+    return torch.cat([xy_b, root_lin_vel_w[:, 2:3]], dim=-1)
+
+
+def _root_yaw_rate(data) -> torch.Tensor:
+    if hasattr(data, "root_link_ang_vel_b"):
+        return data.root_link_ang_vel_b[:, 2]
+    if hasattr(data, "root_ang_vel_b"):
+        return data.root_ang_vel_b[:, 2]
+    return _root_ang_vel_w(data)[:, 2]
+
+
 def _standing_joint_target_tensor(env: ManagerBasedRLEnv, dtype: torch.dtype) -> torch.Tensor:
     device = torch.device(env.device)
     target = getattr(env, "_smp_standing_joint_target", None)
@@ -329,7 +351,7 @@ def standing_pose_reward(
 
     return (
         0.20 * height
-        + 1.50 * pose
+        + 1.00 * pose
         + 0.20 * upright
         + 0.08 * lin_quiet
         + 0.05 * ang_quiet
@@ -366,7 +388,7 @@ def steering_task_smp_product(
     env: ManagerBasedRLEnv,
     command_name: str = "steering",
     vel_err_scale: float = 1.0,
-    velocity_weight: float = 1.5,
+    velocity_weight: float = 0.5,
     face_weight: float = 0.5,
     fixed_timesteps: tuple[int, ...] = (8, 15, 22),
     ws: float = 6.0,
@@ -387,6 +409,42 @@ def steering_task_smp_product(
     # print("task reward:", task)
     # print("style reward:", style)
     return task * style
+
+
+def body_velocity_task_smp_product(
+    env: ManagerBasedRLEnv,
+    command_name: str = "body_velocity",
+    lin_vel_err_scale: float = 2.0,
+    yaw_rate_err_scale: float = 1.0,
+    lin_vel_weight: float = 0.75,
+    yaw_rate_weight: float = 0.25,
+    stand_speed_threshold: float = 0.2,
+    stand_yaw_rate_threshold: float = 0.2,
+    use_stand_branch: bool = True,
+    fixed_timesteps: tuple[int, ...] = (8, 15, 22),
+    ws: float = 6.0,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Track body-frame commands, using explicit standing reward in the low-speed deadzone."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    command = env.command_manager.get_term(command_name)
+
+    root_lin_vel_b = _root_lin_vel_b(asset.data)
+    lin_vel_err = torch.sum((root_lin_vel_b[:, :2] - command.lin_vel_b) ** 2, dim=-1)
+    lin_vel_reward = torch.exp(-lin_vel_err_scale * lin_vel_err)
+
+    yaw_rate_err = (command.yaw_rate - _root_yaw_rate(asset.data)) ** 2
+    yaw_rate_reward = torch.exp(-yaw_rate_err_scale * yaw_rate_err)
+
+    task = lin_vel_weight * lin_vel_reward + yaw_rate_weight * yaw_rate_reward
+    moving_reward = task * smp_guidance_reward(env, fixed_timesteps=fixed_timesteps, ws=ws)
+    if not use_stand_branch:
+        return moving_reward
+
+    cmd_speed = torch.linalg.norm(command.lin_vel_b, dim=-1)
+    stand_mask = (cmd_speed < stand_speed_threshold) & (torch.abs(command.yaw_rate) < stand_yaw_rate_threshold)
+    stand_reward = standing_pose_reward(env, asset_cfg=asset_cfg)
+    return torch.where(stand_mask, stand_reward, moving_reward)
 
 
 def steering_modified_task_smp_product(

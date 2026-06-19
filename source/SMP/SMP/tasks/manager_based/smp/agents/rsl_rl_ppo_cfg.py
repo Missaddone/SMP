@@ -57,5 +57,23 @@ class SteeringModifiedPPORunnerCfg(PPORunnerCfg):
 
 
 @configclass
+class SteeringWithStandPPORunnerCfg(PPORunnerCfg):
+    experiment_name = "smp_steering_with_stand_g1"
+    run_name = "smp_steering_with_stand_g1"
+
+
+@configclass
+class BodyVelocityPPORunnerCfg(PPORunnerCfg):
+    experiment_name = "smp_body_velocity_g1"
+    run_name = "smp_body_velocity_g1"
+
+
+@configclass
+class ZeroVelocityPPORunnerCfg(PPORunnerCfg):
+    experiment_name = "smp_zero_velocity_g1"
+    run_name = "smp_zero_velocity_g1"
+
+
+@configclass
 class SteeringDoublePriorPPORunnerCfg(PPORunnerCfg):
     experiment_name = "smp_steering_doubleprior_g1"

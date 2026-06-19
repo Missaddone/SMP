@@ -235,3 +235,97 @@ class SteeringCommandCfg(CommandTermCfg):
     )
     goal_vel_visualizer_cfg.markers["arrow"].scale = (0.5, 0.5, 0.5)
     current_vel_visualizer_cfg.markers["arrow"].scale = (0.5, 0.5, 0.5)
+
+
+class BodyVelocityCommand(CommandTerm):
+    """Periodic body-frame xy velocity and yaw-rate command."""
+
+    cfg: "BodyVelocityCommandCfg"
+
+    def __init__(self, cfg: "BodyVelocityCommandCfg", env):
+        super().__init__(cfg, env)
+        self.robot = env.scene[cfg.asset_name]
+        self.lin_vel_b = torch.zeros(self.num_envs, 2, device=self.device)
+        self.yaw_rate = torch.zeros(self.num_envs, device=self.device)
+        self.command_b = torch.zeros(self.num_envs, 3, device=self.device)
+        self.metrics["error_vel_xy"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["error_yaw_rate"] = torch.zeros(self.num_envs, device=self.device)
+
+    @property
+    def command(self) -> torch.Tensor:
+        return self.command_b
+
+    def _root_lin_vel_b(self) -> torch.Tensor:
+        data = self.robot.data
+        if hasattr(data, "root_link_lin_vel_b"):
+            return data.root_link_lin_vel_b
+        if hasattr(data, "root_lin_vel_b"):
+            return data.root_lin_vel_b
+        root_vel_w = data.root_link_lin_vel_w if hasattr(data, "root_link_lin_vel_w") else data.root_lin_vel_w
+        heading_w = _heading_w(data)
+        lin_vel_xy_b = _dir_world_to_local(root_vel_w[:, :2], heading_w)
+        return torch.cat([lin_vel_xy_b, root_vel_w[:, 2:3]], dim=-1)
+
+    def _root_yaw_rate(self) -> torch.Tensor:
+        data = self.robot.data
+        if hasattr(data, "root_link_ang_vel_b"):
+            return data.root_link_ang_vel_b[:, 2]
+        if hasattr(data, "root_ang_vel_b"):
+            return data.root_ang_vel_b[:, 2]
+        root_ang_vel_w = data.root_link_ang_vel_w if hasattr(data, "root_link_ang_vel_w") else data.root_ang_vel_w
+        return root_ang_vel_w[:, 2]
+
+    def _update_metrics(self) -> None:
+        root_lin_vel_b = self._root_lin_vel_b()
+        self.metrics["error_vel_xy"] = torch.linalg.norm(self.lin_vel_b - root_lin_vel_b[:, :2], dim=-1)
+        self.metrics["error_yaw_rate"] = torch.abs(self.yaw_rate - self._root_yaw_rate())
+
+    def _resample_command(self, env_ids: torch.Tensor) -> None:
+        num_envs = int(env_ids.numel())
+        if num_envs == 0:
+            return
+
+        theta = torch.empty(num_envs, device=self.device).uniform_(-math.pi, math.pi)
+        stand_mask = torch.rand(num_envs, device=self.device) < self.cfg.stand_sample_prob
+        speed = torch.empty(num_envs, device=self.device)
+        if stand_mask.any():
+            speed[stand_mask] = torch.empty(int(stand_mask.sum()), device=self.device).uniform_(
+                0.0,
+                self.cfg.stand_speed_max,
+            )
+        if (~stand_mask).any():
+            speed[~stand_mask] = torch.empty(int((~stand_mask).sum()), device=self.device).uniform_(
+                self.cfg.speed_min,
+                self.cfg.speed_max,
+            )
+        self.lin_vel_b[env_ids, 0] = speed * torch.cos(theta)
+        self.lin_vel_b[env_ids, 1] = speed * torch.sin(theta)
+        yaw_rate = torch.empty(num_envs, device=self.device)
+        if stand_mask.any():
+            yaw_rate[stand_mask] = torch.empty(int(stand_mask.sum()), device=self.device).uniform_(
+                -self.cfg.stand_yaw_rate_max,
+                self.cfg.stand_yaw_rate_max,
+            )
+        if (~stand_mask).any():
+            yaw_rate[~stand_mask] = torch.empty(int((~stand_mask).sum()), device=self.device).uniform_(
+                self.cfg.yaw_rate_min,
+                self.cfg.yaw_rate_max,
+            )
+        self.yaw_rate[env_ids] = yaw_rate
+
+    def _update_command(self) -> None:
+        self.command_b[:, 0:2] = self.lin_vel_b
+        self.command_b[:, 2] = self.yaw_rate
+
+
+@configclass
+class BodyVelocityCommandCfg(CommandTermCfg):
+    class_type: type = BodyVelocityCommand
+    asset_name: str = MISSING
+    speed_min: float = 0.5
+    speed_max: float = 3.0
+    yaw_rate_min: float = -1.0
+    yaw_rate_max: float = 1.0
+    stand_sample_prob: float = 0.2
+    stand_speed_max: float = 0.15
+    stand_yaw_rate_max: float = 0.2
