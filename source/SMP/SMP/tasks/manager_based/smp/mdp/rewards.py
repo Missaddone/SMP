@@ -418,6 +418,7 @@ def body_velocity_task_smp_product(
     yaw_rate_err_scale: float = 1.0,
     lin_vel_weight: float = 0.75,
     yaw_rate_weight: float = 0.25,
+    zero_lin_vel_target: bool = False,
     stand_speed_threshold: float = 0.2,
     stand_yaw_rate_threshold: float = 0.2,
     use_stand_branch: bool = True,
@@ -430,7 +431,8 @@ def body_velocity_task_smp_product(
     command = env.command_manager.get_term(command_name)
 
     root_lin_vel_b = _root_lin_vel_b(asset.data)
-    lin_vel_err = torch.sum((root_lin_vel_b[:, :2] - command.lin_vel_b) ** 2, dim=-1)
+    target_lin_vel_b = torch.zeros_like(command.lin_vel_b) if zero_lin_vel_target else command.lin_vel_b
+    lin_vel_err = torch.sum((root_lin_vel_b[:, :2] - target_lin_vel_b) ** 2, dim=-1)
     lin_vel_reward = torch.exp(-lin_vel_err_scale * lin_vel_err)
 
     yaw_rate_err = (command.yaw_rate - _root_yaw_rate(asset.data)) ** 2

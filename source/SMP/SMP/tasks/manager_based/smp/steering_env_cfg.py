@@ -5,11 +5,12 @@
 
 from isaaclab.managers import CommandTermCfg as CmdTerm
 from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.utils import configclass
 
 from . import mdp
-from .forward_env_cfg import SmpG1ForwardEnvCfg
+from .forward_env_cfg import ForwardObservationsCfg, SmpG1ForwardEnvCfg
 from .smp_env_cfg import CommandsCfg, EventCfg, PRETRAIN_CKPT_DIR, RewardsCfg
 
 
@@ -90,15 +91,15 @@ class BodyVelocityCommandsCfg(CommandsCfg):
 
 @configclass
 class ZeroVelocityCommandsCfg(CommandsCfg):
-    """Command config used by Smp-G1-ZeroVelocity-v0."""
+    """Yaw-rate command with small linear-command disturbances."""
 
     steering: CmdTerm = mdp.BodyVelocityCommandCfg(
         asset_name="robot",
         resampling_time_range=(3.0, 8.0),
         speed_min=0.0,
-        speed_max=0.0,
-        yaw_rate_min=0.0,
-        yaw_rate_max=0.0,
+        speed_max=0.5,
+        yaw_rate_min=-1.0,
+        yaw_rate_max=1.0,
         stand_sample_prob=0.0,
     )
 
@@ -125,6 +126,21 @@ class SteeringEventCfg(EventCfg):
 
 
 @configclass
+class BodyVelocityEventCfg(EventCfg):
+    """Load the locomotion prior for Smp-G1-BodyVelocity-v0."""
+
+    init_smp_state = EventTerm(
+        func=mdp.init_smp_state,
+        mode="startup",
+        params={
+            "ckpt_path": str(PRETRAIN_CKPT_DIR / "pretrained_loco.pt"),
+            "gsi_buffer_size": 4096,
+            "gsi_batch_size": 1024,
+        },
+    )
+
+
+@configclass
 class ZeroVelocityEventCfg(EventCfg):
     """Load the standing style prior for Smp-G1-ZeroVelocity-v0."""
 
@@ -137,6 +153,22 @@ class ZeroVelocityEventCfg(EventCfg):
             "gsi_batch_size": 1024,
         },
     )
+
+
+########################################
+# Observations
+########################################
+
+
+@configclass
+class BodyVelocityObservationsCfg(ForwardObservationsCfg):
+    """Body-velocity observations without base linear velocity for the actor."""
+
+    @configclass
+    class PolicyCfg(ForwardObservationsCfg.PolicyCfg):
+        base_lin_vel: ObsTerm | None = None
+
+    policy: PolicyCfg = PolicyCfg()
 
 
 ########################################
@@ -240,7 +272,7 @@ class BodyVelocityRewardsCfg(RewardsCfg):
 
 @configclass
 class ZeroVelocityRewardsCfg(RewardsCfg):
-    """Zero-velocity task reward gated by the standing SMP prior."""
+    """Zero-linear-velocity and commanded-yaw-rate reward gated by the standing prior."""
 
     alive = None
     terminating = None
@@ -254,6 +286,7 @@ class ZeroVelocityRewardsCfg(RewardsCfg):
             "yaw_rate_err_scale": 1.0,
             "lin_vel_weight": 0.75,
             "yaw_rate_weight": 0.25,
+            "zero_lin_vel_target": True,
             "use_stand_branch": False,
             "fixed_timesteps": (8, 15, 22),
             "ws": 6.0,
@@ -303,12 +336,14 @@ class SmpG1BodyVelocityEnvCfg(SmpG1SteeringEnvCfg):
     """Deployable body-velocity steering task without a standing branch."""
 
     commands: BodyVelocityCommandsCfg = BodyVelocityCommandsCfg()
+    events: BodyVelocityEventCfg = BodyVelocityEventCfg()
+    observations: BodyVelocityObservationsCfg = BodyVelocityObservationsCfg()
     rewards: BodyVelocityRewardsCfg = BodyVelocityRewardsCfg()
 
 
 @configclass
 class SmpG1ZeroVelocityEnvCfg(SmpG1SteeringEnvCfg):
-    """Zero-velocity task using a dedicated standing SMP style prior."""
+    """Zero-linear-velocity and yaw-rate tracking task using a standing style prior."""
 
     commands: ZeroVelocityCommandsCfg = ZeroVelocityCommandsCfg()
     events: ZeroVelocityEventCfg = ZeroVelocityEventCfg()
