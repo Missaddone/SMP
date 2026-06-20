@@ -10,14 +10,20 @@ from isaaclab.utils import configclass
 from SMP.tasks.manager_based.smp import mdp
 from SMP.tasks.manager_based.smp.forward_env_cfg import ForwardObservationsCfg, ForwardTerminationsCfg
 from SMP.tasks.manager_based.smp.smp_env_cfg import EventCfg, RewardsCfg
-from SMP.tasks.manager_based.smp.steering_env_cfg import SteeringWithStandCommandsCfg, SmpG1SteeringEnvCfg
+from SMP.tasks.manager_based.smp.steering_env_cfg import (
+    BodyVelocityObservationsCfg,
+    SteeringWithStandCommandsCfg,
+    SmpG1SteeringEnvCfg,
+)
 
 
 @configclass
 class BodyVelocityDistillationObservationsCfg:
     """Observation groups used by dual-policy body-velocity distillation."""
 
-    policy: ForwardObservationsCfg.PolicyCfg = ForwardObservationsCfg.PolicyCfg()
+    # Student policy must use deployable observations; teacher groups may keep
+    # privileged base linear velocity to match existing teacher checkpoints.
+    policy: BodyVelocityObservationsCfg.PolicyCfg = BodyVelocityObservationsCfg.PolicyCfg()
     teacher_0: ForwardObservationsCfg.PolicyCfg = ForwardObservationsCfg.PolicyCfg()
     teacher_1: ForwardObservationsCfg.PolicyCfg = ForwardObservationsCfg.PolicyCfg()
 
@@ -60,4 +66,3 @@ class G1BodyVelocityDualDistillationEnvCfg(SmpG1SteeringEnvCfg):
     events: BodyVelocityDistillationEventCfg = BodyVelocityDistillationEventCfg()
     rewards: BodyVelocityDistillationRewardsCfg = BodyVelocityDistillationRewardsCfg()
     terminations: ForwardTerminationsCfg = ForwardTerminationsCfg()
-
