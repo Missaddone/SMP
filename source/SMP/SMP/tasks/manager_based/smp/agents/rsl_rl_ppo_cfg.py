@@ -69,6 +69,30 @@ class BodyVelocityPPORunnerCfg(PPORunnerCfg):
 
 
 @configclass
+class BodyVelocityLafanWalkPPORunnerCfg(PPORunnerCfg):
+    experiment_name = "smp_body_velocity_lafan_walk_g1"
+    run_name = "smp_body_velocity_lafan_walk_g1"
+
+
+@configclass
+class BodyVelocityLafanWalkMatchedPPORunnerCfg(PPORunnerCfg):
+    experiment_name = "smp_body_velocity_lafan_walk_matched_g1"
+    run_name = "smp_body_velocity_lafan_walk_matched_g1"
+
+
+@configclass
+class BodyVelocityHandCollisionPPORunnerCfg(PPORunnerCfg):
+    experiment_name = "smp_body_velocity_hand_collision_g1"
+    run_name = "smp_body_velocity_hand_collision_g1"
+
+
+@configclass
+class BodyVelocityFootRegularizedPPORunnerCfg(PPORunnerCfg):
+    experiment_name = "smp_body_velocity_foot_regularized_g1"
+    run_name = "smp_body_velocity_foot_regularized_g1"
+
+
+@configclass
 class ZeroVelocityPPORunnerCfg(PPORunnerCfg):
     experiment_name = "smp_zero_velocity_g1"
     run_name = "smp_zero_velocity_g1"

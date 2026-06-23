@@ -287,6 +287,14 @@ class BodyVelocityCommand(CommandTerm):
 
         theta = torch.empty(num_envs, device=self.device).uniform_(-math.pi, math.pi)
         stand_mask = torch.rand(num_envs, device=self.device) < self.cfg.stand_sample_prob
+        if self.cfg.reset_stand_mask_attr is not None:
+            reset_labels = getattr(self._env, self.cfg.reset_stand_mask_attr, None)
+            if reset_labels is not None:
+                forced_mask = reset_labels[env_ids] >= 0
+                if forced_mask.any():
+                    stand_mask[forced_mask] = reset_labels[env_ids[forced_mask]].bool()
+                    # Consume reset labels once; interval command resampling remains random.
+                    reset_labels[env_ids[forced_mask]] = -1
         speed = torch.empty(num_envs, device=self.device)
         if stand_mask.any():
             speed[stand_mask] = torch.empty(int(stand_mask.sum()), device=self.device).uniform_(
@@ -312,6 +320,10 @@ class BodyVelocityCommand(CommandTerm):
                 self.cfg.yaw_rate_max,
             )
         self.yaw_rate[env_ids] = yaw_rate
+        # Reset returns observations before the next command-manager compute call.
+        # Synchronize immediately so the first post-reset observation uses the new command.
+        self.command_b[env_ids, 0:2] = self.lin_vel_b[env_ids]
+        self.command_b[env_ids, 2] = self.yaw_rate[env_ids]
 
     def _update_command(self) -> None:
         self.command_b[:, 0:2] = self.lin_vel_b
@@ -329,3 +341,4 @@ class BodyVelocityCommandCfg(CommandTermCfg):
     stand_sample_prob: float = 0.2
     stand_speed_max: float = 0.15
     stand_yaw_rate_max: float = 0.2
+    reset_stand_mask_attr: str | None = None

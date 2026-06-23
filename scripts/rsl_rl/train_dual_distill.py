@@ -9,6 +9,7 @@
 
 import argparse
 import copy
+import importlib.metadata as metadata
 import os
 import sys
 import time
@@ -94,34 +95,24 @@ def _call_policy(policy: torch.nn.Module, obs) -> torch.Tensor:
 def _load_actor_only(policy: torch.nn.Module, checkpoint_path: str, device: str) -> None:
     checkpoint_path = os.path.expanduser(checkpoint_path)
     loaded = torch.load(checkpoint_path, weights_only=False, map_location=device)
-    state_dict = loaded.get("model_state_dict", loaded)
-
-    actor_state_dict = {}
-    for key, value in state_dict.items():
-        if key.startswith("actor.") or key.startswith("actor_obs_normalizer."):
-            actor_state_dict[key] = value
-        elif key in ("std", "log_std", "std_param", "log_std_param"):
-            actor_state_dict[key] = value
+    if "actor_state_dict" in loaded:
+        # RSL-RL >= 4 checkpoint format.
+        actor_state_dict = loaded["actor_state_dict"]
+    else:
+        # Keep support for checkpoints produced by the original custom script.
+        state_dict = loaded.get("model_state_dict", loaded)
+        actor_state_dict = {
+            key.removeprefix("actor."): value
+            for key, value in state_dict.items()
+            if key.startswith("actor.")
+            or key.startswith("actor_obs_normalizer.")
+            or key in ("std", "log_std", "std_param", "log_std_param")
+        }
 
     if not actor_state_dict:
         raise ValueError(f"Checkpoint does not contain actor parameters: {checkpoint_path}")
 
-    missing_keys, unexpected_keys = policy.load_state_dict(actor_state_dict, strict=False)
-    actor_missing = [
-        key
-        for key in missing_keys
-        if key.startswith("actor.") or key.startswith("actor_obs_normalizer.") or key in actor_state_dict
-    ]
-    actor_unexpected = [
-        key
-        for key in unexpected_keys
-        if key.startswith("actor.") or key.startswith("actor_obs_normalizer.") or key in actor_state_dict
-    ]
-    if actor_missing or actor_unexpected:
-        print(
-            "[WARN] Teacher actor checkpoint loaded with non-strict differences: "
-            f"missing={actor_missing}, unexpected={actor_unexpected}"
-        )
+    policy.load_state_dict(actor_state_dict, strict=True)
 
 
 def _teacher_1_mask_from_selector(selector_obs: torch.Tensor, agent_cfg: RslRlBaseRunnerCfg) -> torch.Tensor:
@@ -146,14 +137,19 @@ def _timeout_tensor_from_extras(extras: dict, dones: torch.Tensor) -> torch.Tens
 def _save_student_checkpoint(
     path: str,
     student: torch.nn.Module,
+    student_runner: OnPolicyRunner,
     optimizer: torch.optim.Optimizer,
     iteration: int,
 ) -> None:
     torch.save(
         {
-            "model_state_dict": student.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
+            # Use the standard RSL-RL checkpoint keys so play.py can load and export the student.
+            "actor_state_dict": student.state_dict(),
+            "critic_state_dict": student_runner.alg.critic.state_dict(),
+            "optimizer_state_dict": student_runner.alg.optimizer.state_dict(),
+            "distill_optimizer_state_dict": optimizer.state_dict(),
             "iter": iteration,
+            "infos": None,
         },
         path,
     )
@@ -162,7 +158,7 @@ def _save_student_checkpoint(
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
-    agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, "3.0.1")
+    agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, metadata.version("rsl-rl-lib"))
 
     if args_cli.teacher_0_checkpoint_path is not None:
         agent_cfg.teacher_0_checkpoint_path = args_cli.teacher_0_checkpoint_path
@@ -282,6 +278,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             last_teacher_1_frac = mean_teacher_1_frac / agent_cfg.num_steps_per_env
             done_frac = mean_done_frac / agent_cfg.num_steps_per_env
             timeout_frac = mean_timeout_frac / agent_cfg.num_steps_per_env
+            timeout_success_rate = timeout_frac / done_frac if done_frac > 0.0 else 0.0
+            early_failure_frac = max(done_frac - timeout_frac, 0.0)
             command_speed = mean_command_speed / agent_cfg.num_steps_per_env
             if finished_lengths:
                 mean_episode_length = torch.cat(finished_lengths).float().mean().item()
@@ -292,6 +290,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             writer.add_scalar("distill/teacher_1_frac", last_teacher_1_frac, iteration)
             writer.add_scalar("env/done_frac", done_frac, iteration)
             writer.add_scalar("env/timeout_frac", timeout_frac, iteration)
+            writer.add_scalar("env/timeout_success_rate", timeout_success_rate, iteration)
+            writer.add_scalar("env/early_failure_frac", early_failure_frac, iteration)
             writer.add_scalar("env/mean_episode_length", mean_episode_length, iteration)
             writer.add_scalar("command/mean_speed", command_speed, iteration)
             writer.add_scalar("train/learning_rate", agent_cfg.algorithm.learning_rate, iteration)
@@ -300,14 +300,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 print(
                     f"[INFO] Iteration {iteration:05d} | loss={last_loss:.6f} "
                     f"| teacher_1_frac={last_teacher_1_frac:.3f} "
-                    f"| done_frac={done_frac:.3f} | ep_len={mean_episode_length:.1f}"
+                    f"| done_frac={done_frac:.3f} | timeout_frac={timeout_frac:.3f} "
+                    f"| timeout_success={timeout_success_rate:.3f} "
+                    f"| early_failure={early_failure_frac:.3f} | ep_len={mean_episode_length:.1f}"
                 )
             if iteration % agent_cfg.save_interval == 0 or iteration == agent_cfg.max_iterations - 1:
                 checkpoint_path = os.path.join(log_dir, "checkpoints", f"model_{iteration:05d}.pt")
-                _save_student_checkpoint(checkpoint_path, student, optimizer, iteration)
+                _save_student_checkpoint(checkpoint_path, student, student_runner, optimizer, iteration)
 
         final_path = os.path.join(log_dir, "model_final.pt")
-        _save_student_checkpoint(final_path, student, optimizer, agent_cfg.max_iterations)
+        _save_student_checkpoint(final_path, student, student_runner, optimizer, agent_cfg.max_iterations)
         print(
             f"[INFO] Finished dual distillation in {round(time.time() - start_time, 2)}s "
             f"| final_loss={last_loss:.6f} | teacher_1_frac={last_teacher_1_frac:.3f}"

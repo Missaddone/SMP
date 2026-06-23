@@ -162,6 +162,61 @@ def init_smp_double_prior_state(
     }
 
 
+def _sample_gsi_pool_from_bundle(
+    env,
+    bundle,
+    pool_size: int,
+    batch_size: int,
+) -> torch.Tensor:
+    """Sample a GSI pool from an explicit SMP bundle without changing the active prior."""
+    chunks: list[torch.Tensor] = []
+    for start in range(0, pool_size, batch_size):
+        current_batch_size = min(batch_size, pool_size - start)
+        chunks.append(_ddpm_sample_from_bundle(bundle, env.device, current_batch_size))
+    return torch.cat(chunks, dim=0)
+
+
+def init_smp_dual_gsi_state(
+    env,
+    env_ids: torch.Tensor | None,
+    moving_ckpt_path: str = "",
+    stand_ckpt_path: str = "",
+    gsi_buffer_size: int = 4096,
+    gsi_batch_size: int = 1024,
+    stand_probability: float = 0.2,
+    reset_mask_attr: str = "_smp_dual_gsi_stand_mask",
+) -> None:
+    """Load moving/standing priors and build a separate GSI pool for each one."""
+    del env_ids
+    if gsi_buffer_size <= 0:
+        raise ValueError("init_smp_dual_gsi_state requires gsi_buffer_size > 0.")
+    if gsi_batch_size <= 0:
+        raise ValueError("init_smp_dual_gsi_state requires gsi_batch_size > 0.")
+    if not 0.0 <= stand_probability <= 1.0:
+        raise ValueError("stand_probability must be in [0, 1].")
+
+    # Initialize shared SMP bookkeeping without creating the legacy single-prior pool.
+    init_smp_double_prior_state(
+        env,
+        None,
+        moving_ckpt_path=moving_ckpt_path,
+        stand_ckpt_path=stand_ckpt_path,
+        gsi_buffer_size=0,
+        gsi_batch_size=gsi_batch_size,
+    )
+    env._smp_dual_gsi_pools = {
+        name: _sample_gsi_pool_from_bundle(env, bundle, gsi_buffer_size, gsi_batch_size)
+        for name, bundle in env._smp_prior_bundles.items()
+    }
+    env._smp_dual_gsi_heads = {name: 0 for name in env._smp_dual_gsi_pools}
+    dual_gsi_reset(
+        env,
+        None,
+        stand_probability=stand_probability,
+        reset_mask_attr=reset_mask_attr,
+    )
+
+
 def _control_dt(env) -> float:
     if hasattr(env, "step_dt"):
         return float(env.step_dt)
@@ -169,15 +224,21 @@ def _control_dt(env) -> float:
 
 
 @torch.no_grad()
-def _ddpm_sample(env, num_samples: int) -> torch.Tensor:
-    """Sample denormalized SMP motion windows from the frozen prior."""
-    model, scheduler, q_low, q_high, feature_dim, window_size = env._smp_bundle
-    x_t = torch.randn(num_samples, window_size, feature_dim, device=env.device)
+def _ddpm_sample_from_bundle(bundle, device: str, num_samples: int) -> torch.Tensor:
+    """Sample denormalized SMP motion windows from a specified frozen prior."""
+    model, scheduler, q_low, q_high, feature_dim, window_size = bundle
+    x_t = torch.randn(num_samples, window_size, feature_dim, device=device)
     for t_int in reversed(range(scheduler.num_timesteps)):
-        t = torch.full((num_samples,), t_int, dtype=torch.long, device=env.device)
+        t = torch.full((num_samples,), t_int, dtype=torch.long, device=device)
         eps = model(x_t, t)
         x_t = scheduler.step(eps, x_t, t_int)
     return (x_t + 1.0) / 2.0 * (q_high - q_low) + q_low
+
+
+@torch.no_grad()
+def _ddpm_sample(env, num_samples: int) -> torch.Tensor:
+    """Sample denormalized SMP motion windows from the active frozen prior."""
+    return _ddpm_sample_from_bundle(env._smp_bundle, env.device, num_samples)
 
 
 def _prime_sim_and_buffer(env, env_ids: torch.Tensor, window: torch.Tensor) -> None:
@@ -258,6 +319,39 @@ def gsi_reset(env, env_ids: torch.Tensor | None) -> None:
 
 
 @torch.no_grad()
+def dual_gsi_reset(
+    env,
+    env_ids: torch.Tensor | None,
+    stand_probability: float = 0.2,
+    reset_mask_attr: str = "_smp_dual_gsi_stand_mask",
+) -> None:
+    """Reset from the standing or moving GSI pool and expose that choice to the command term."""
+    if not hasattr(env, "_smp_dual_gsi_pools"):
+        return
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
+    else:
+        env_ids = torch.as_tensor(env_ids, device=env.device, dtype=torch.long)
+    if env_ids.numel() == 0:
+        return
+
+    stand_mask = torch.rand(env_ids.numel(), device=env.device) < stand_probability
+    reset_labels = getattr(env, reset_mask_attr, None)
+    if reset_labels is None:
+        reset_labels = torch.full((env.num_envs,), -1, device=env.device, dtype=torch.int8)
+        setattr(env, reset_mask_attr, reset_labels)
+    reset_labels[env_ids] = stand_mask.to(torch.int8)
+
+    for prior_name, local_mask in (("stand", stand_mask), ("moving", ~stand_mask)):
+        selected_env_ids = env_ids[local_mask]
+        if selected_env_ids.numel() == 0:
+            continue
+        pool = env._smp_dual_gsi_pools[prior_name]
+        indices = torch.randint(0, pool.shape[0], (selected_env_ids.numel(),), device=env.device)
+        _prime_sim_and_buffer(env, selected_env_ids, pool[indices])
+
+
+@torch.no_grad()
 def gsi_refresh(
     env,
     env_ids: torch.Tensor | None,
@@ -289,6 +383,34 @@ def gsi_refresh(
         pool[head:] = new_windows[:first]
         pool[: end - pool.shape[0]] = new_windows[first:]
     env._smp_gsi_head = end % pool.shape[0]
+
+
+@torch.no_grad()
+def dual_gsi_refresh(
+    env,
+    env_ids: torch.Tensor | None,
+    num_samples_per_prior: int = 512,
+) -> None:
+    """Refresh a chunk of both standing and moving GSI pools."""
+    del env_ids
+    if not hasattr(env, "_smp_dual_gsi_pools"):
+        return
+    for prior_name, pool in env._smp_dual_gsi_pools.items():
+        num_samples = min(num_samples_per_prior, pool.shape[0])
+        new_windows = _ddpm_sample_from_bundle(
+            env._smp_prior_bundles[prior_name],
+            env.device,
+            num_samples,
+        )
+        head = int(env._smp_dual_gsi_heads[prior_name])
+        end = head + num_samples
+        if end <= pool.shape[0]:
+            pool[head:end] = new_windows
+        else:
+            first = pool.shape[0] - head
+            pool[head:] = new_windows[:first]
+            pool[: end - pool.shape[0]] = new_windows[first:]
+        env._smp_dual_gsi_heads[prior_name] = end % pool.shape[0]
 
 
 @torch.no_grad()

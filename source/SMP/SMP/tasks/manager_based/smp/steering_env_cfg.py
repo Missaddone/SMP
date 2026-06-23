@@ -81,25 +81,25 @@ class BodyVelocityCommandsCfg(CommandsCfg):
     steering: CmdTerm = mdp.BodyVelocityCommandCfg(
         asset_name="robot",
         resampling_time_range=(3.0, 8.0),
-        speed_min=0.5,
+        speed_min=0.0,
         speed_max=3.0,
-        yaw_rate_min=-1.0,
-        yaw_rate_max=1.0,
+        yaw_rate_min=-2.0,
+        yaw_rate_max=2.0,
         stand_sample_prob=0.0,
     )
 
 
 @configclass
 class ZeroVelocityCommandsCfg(CommandsCfg):
-    """Yaw-rate command with small linear-command disturbances."""
+    """Pure-standing command with small ignored linear-command disturbances."""
 
     steering: CmdTerm = mdp.BodyVelocityCommandCfg(
         asset_name="robot",
         resampling_time_range=(3.0, 8.0),
         speed_min=0.0,
         speed_max=0.5,
-        yaw_rate_min=-1.0,
-        yaw_rate_max=1.0,
+        yaw_rate_min=0.0,
+        yaw_rate_max=0.0,
         stand_sample_prob=0.0,
     )
 
@@ -133,7 +133,8 @@ class BodyVelocityEventCfg(EventCfg):
         func=mdp.init_smp_state,
         mode="startup",
         params={
-            "ckpt_path": str(PRETRAIN_CKPT_DIR / "pretrained_loco.pt"),
+            # "ckpt_path": str(PRETRAIN_CKPT_DIR / "pretrained_loco.pt"),
+            "ckpt_path": str(PRETRAIN_CKPT_DIR / "pretrained_lafan_run.pt"),
             "gsi_buffer_size": 4096,
             "gsi_batch_size": 1024,
         },
@@ -272,7 +273,7 @@ class BodyVelocityRewardsCfg(RewardsCfg):
 
 @configclass
 class ZeroVelocityRewardsCfg(RewardsCfg):
-    """Zero-linear-velocity and commanded-yaw-rate reward gated by the standing prior."""
+    """Zero-linear-velocity reward gated by the standing prior, without yaw tracking."""
 
     alive = None
     terminating = None
@@ -284,14 +285,15 @@ class ZeroVelocityRewardsCfg(RewardsCfg):
             "command_name": "steering",
             "lin_vel_err_scale": 2.0,
             "yaw_rate_err_scale": 1.0,
-            "lin_vel_weight": 0.75,
-            "yaw_rate_weight": 0.25,
+            "lin_vel_weight": 1.0,
+            "yaw_rate_weight": 0.0,
             "zero_lin_vel_target": True,
             "use_stand_branch": False,
             "fixed_timesteps": (8, 15, 22),
             "ws": 6.0,
         },
     )
+    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
 
 
 ################################################################################

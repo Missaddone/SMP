@@ -422,11 +422,14 @@ def body_velocity_task_smp_product(
     stand_speed_threshold: float = 0.2,
     stand_yaw_rate_threshold: float = 0.2,
     use_stand_branch: bool = True,
+    style_floor: float = 0.0,
     fixed_timesteps: tuple[int, ...] = (8, 15, 22),
     ws: float = 6.0,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
     """Track body-frame commands, using explicit standing reward in the low-speed deadzone."""
+    if not 0.0 <= style_floor <= 1.0:
+        raise ValueError(f"style_floor must be in [0, 1], got {style_floor}.")
     asset: Articulation = env.scene[asset_cfg.name]
     command = env.command_manager.get_term(command_name)
 
@@ -439,7 +442,8 @@ def body_velocity_task_smp_product(
     yaw_rate_reward = torch.exp(-yaw_rate_err_scale * yaw_rate_err)
 
     task = lin_vel_weight * lin_vel_reward + yaw_rate_weight * yaw_rate_reward
-    moving_reward = task * smp_guidance_reward(env, fixed_timesteps=fixed_timesteps, ws=ws)
+    style = smp_guidance_reward(env, fixed_timesteps=fixed_timesteps, ws=ws)
+    moving_reward = task * (style_floor + (1.0 - style_floor) * style)
     if not use_stand_branch:
         return moving_reward
 
@@ -447,6 +451,102 @@ def body_velocity_task_smp_product(
     stand_mask = (cmd_speed < stand_speed_threshold) & (torch.abs(command.yaw_rate) < stand_yaw_rate_threshold)
     stand_reward = standing_pose_reward(env, asset_cfg=asset_cfg)
     return torch.where(stand_mask, stand_reward, moving_reward)
+
+
+def filtered_contact_force_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    threshold: float = 2.0,
+    saturation_force: float = 20.0,
+) -> torch.Tensor:
+    """Return a bounded penalty for contacts selected by a filtered contact sensor."""
+    contact_sensor = env.scene.sensors[sensor_cfg.name]
+    force_history = contact_sensor.data.force_matrix_w_history
+    if force_history is None:
+        raise RuntimeError(
+            f"Contact sensor '{sensor_cfg.name}' must define filter_prim_paths_expr to compute filtered contacts."
+        )
+    if saturation_force <= threshold:
+        raise ValueError("saturation_force must be greater than threshold.")
+
+    # One bounded value per hand, robust to brief force spikes and multiple simultaneous contacts.
+    contact_force = torch.linalg.norm(force_history, dim=-1).amax(dim=(1, 2, 3))
+    return ((contact_force - threshold) / (saturation_force - threshold)).clamp(min=0.0, max=1.0)
+
+
+def feet_slide_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg,
+    contact_threshold: float = 1.0,
+) -> torch.Tensor:
+    """Penalize horizontal foot velocity while the corresponding foot is in contact."""
+    contact_sensor = env.scene.sensors[sensor_cfg.name]
+    forces = contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids]
+    in_contact = torch.linalg.norm(forces, dim=-1).amax(dim=1) > contact_threshold
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    body_vel_w = _data_attr(asset.data, "body_link_lin_vel_w", "body_lin_vel_w")[:, asset_cfg.body_ids]
+    return torch.sum(torch.linalg.norm(body_vel_w[..., :2], dim=-1) * in_contact, dim=1)
+
+
+def support_foot_tilt_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg,
+    contact_threshold: float = 1.0,
+) -> torch.Tensor:
+    """Penalize roll/pitch tilt of each foot only while it supports the robot."""
+    contact_sensor = env.scene.sensors[sensor_cfg.name]
+    forces = contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids]
+    in_contact = torch.linalg.norm(forces, dim=-1).amax(dim=1) > contact_threshold
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    body_quat_w = _data_attr(asset.data, "body_link_quat_w", "body_quat_w")[:, asset_cfg.body_ids]
+    local_up = torch.zeros((*body_quat_w.shape[:-1], 3), device=body_quat_w.device, dtype=body_quat_w.dtype)
+    local_up[..., 2] = 1.0
+    foot_up_w = quat_apply(body_quat_w.reshape(-1, 4), local_up.reshape(-1, 3)).reshape_as(local_up)
+    tilt = torch.sum(torch.square(foot_up_w[..., :2]), dim=-1)
+    return torch.sum(tilt * in_contact, dim=1)
+
+
+def biped_feet_air_time_reward(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    sensor_cfg: SceneEntityCfg,
+    threshold: float = 0.4,
+    command_speed_threshold: float = 0.15,
+) -> torch.Tensor:
+    """Reward bounded single-stance duration while a locomotion command is active."""
+    contact_sensor = env.scene.sensors[sensor_cfg.name]
+    air_time = contact_sensor.data.current_air_time[:, sensor_cfg.body_ids]
+    contact_time = contact_sensor.data.current_contact_time[:, sensor_cfg.body_ids]
+    in_contact = contact_time > 0.0
+    in_mode_time = torch.where(in_contact, contact_time, air_time)
+    single_stance = torch.sum(in_contact, dim=1) == 1
+    reward = torch.min(torch.where(single_stance.unsqueeze(-1), in_mode_time, 0.0), dim=1).values
+    reward = torch.clamp(reward, max=threshold)
+    command_speed = torch.linalg.norm(env.command_manager.get_command(command_name)[:, :2], dim=1)
+    return reward * (command_speed > command_speed_threshold)
+
+
+def persistent_single_support_penalty(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    sensor_cfg: SceneEntityCfg,
+    max_single_support_time: float = 0.6,
+    max_excess_time: float = 1.0,
+    command_speed_threshold: float = 0.15,
+) -> torch.Tensor:
+    """Penalize one foot remaining the sole support for an abnormally long time."""
+    contact_sensor = env.scene.sensors[sensor_cfg.name]
+    contact_time = contact_sensor.data.current_contact_time[:, sensor_cfg.body_ids]
+    in_contact = contact_time > 0.0
+    single_stance = torch.sum(in_contact, dim=1) == 1
+    support_time = torch.max(contact_time, dim=1).values
+    excess = (support_time - max_single_support_time).clamp(min=0.0, max=max_excess_time)
+    command_speed = torch.linalg.norm(env.command_manager.get_command(command_name)[:, :2], dim=1)
+    return excess * single_stance * (command_speed > command_speed_threshold)
 
 
 def steering_modified_task_smp_product(
