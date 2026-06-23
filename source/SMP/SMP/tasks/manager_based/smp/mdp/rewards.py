@@ -71,6 +71,31 @@ def _data_attr(data, *names: str) -> torch.Tensor:
     raise AttributeError(f"None of these articulation data fields exist: {names}")
 
 
+def base_upright_penalty(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
+    """Penalize base roll/pitch tilt using projected gravity."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    return torch.sum(torch.square(asset.data.projected_gravity_b[:, :2]), dim=1)
+
+
+def root_height_below_target_penalty(
+    env: ManagerBasedRLEnv,
+    target_height: float = 0.74,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Penalize the root dropping below a soft walking-height target."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    root_pos_w = _data_attr(asset.data, "root_link_pos_w", "root_pos_w")
+    root_height = root_pos_w[:, 2] - env.scene.env_origins[:, 2]
+    return torch.square((target_height - root_height).clamp(min=0.0))
+
+
+def joint_deviation_l2(env: ManagerBasedRLEnv, target: float, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Penalize selected joints deviating from a scalar target."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    joint_pos = wrap_to_pi(asset.data.joint_pos[:, asset_cfg.joint_ids])
+    return torch.sum(torch.square(joint_pos - target), dim=1)
+
+
 def _update_smp_buffer_from_sim(env: ManagerBasedRLEnv) -> None:
     robot: Articulation = env.scene["robot"]
     data = robot.data

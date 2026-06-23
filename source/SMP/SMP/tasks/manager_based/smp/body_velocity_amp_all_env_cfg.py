@@ -1,4 +1,4 @@
-"""Body-velocity experiment using the local-normalized LAFAN walk/run prior."""
+"""Body-velocity experiment using the AMP all-motion prior."""
 
 from isaaclab.managers import CommandTermCfg as CmdTerm
 from isaaclab.managers import EventTermCfg as EventTerm
@@ -11,14 +11,14 @@ from .steering_env_cfg import SmpG1BodyVelocityEnvCfg
 
 
 @configclass
-class BodyVelocityLafanWalkRunEventCfg(EventCfg):
-    """Load the local-normalized LAFAN walk/run prior."""
+class BodyVelocityAmpAllEventCfg(EventCfg):
+    """Load the AMP all-motion prior."""
 
     init_smp_state = EventTerm(
         func=mdp.init_smp_state,
         mode="startup",
         params={
-            "ckpt_path": str(PRETRAIN_CKPT_DIR / "lafan_walk_run_local_nrom.pt"),
+            "ckpt_path": str(PRETRAIN_CKPT_DIR / "amp_all.pt"),
             "gsi_buffer_size": 4096,
             "gsi_batch_size": 1024,
         },
@@ -26,13 +26,13 @@ class BodyVelocityLafanWalkRunEventCfg(EventCfg):
 
 
 @configclass
-class BodyVelocityLafanWalkRunCommandsCfg(CommandsCfg):
-    """Commands matched to the walk/run prior without standing samples."""
+class BodyVelocityAmpAllCommandsCfg(CommandsCfg):
+    """Wide body-velocity commands for validating the all-motion prior."""
 
     steering: CmdTerm = mdp.BodyVelocityCommandCfg(
         asset_name="robot",
         resampling_time_range=(3.0, 8.0),
-        speed_min=0.25,
+        speed_min=0.0,
         speed_max=5.0,
         yaw_rate_min=-2.0,
         yaw_rate_max=2.0,
@@ -41,8 +41,8 @@ class BodyVelocityLafanWalkRunCommandsCfg(CommandsCfg):
 
 
 @configclass
-class BodyVelocityLafanWalkRunRewardsCfg(RewardsCfg):
-    """Keep task feedback alive while applying the walk/run style prior."""
+class BodyVelocityAmpAllRewardsCfg(RewardsCfg):
+    """Pure task-style product without a style floor."""
 
     alive = None
     terminating = None
@@ -65,9 +65,9 @@ class BodyVelocityLafanWalkRunRewardsCfg(RewardsCfg):
 
 
 @configclass
-class SmpG1BodyVelocityLafanWalkRunEnvCfg(SmpG1BodyVelocityEnvCfg):
-    """BodyVelocity task for validating a single walk/run motion prior."""
+class SmpG1BodyVelocityAmpAllEnvCfg(SmpG1BodyVelocityEnvCfg):
+    """BodyVelocity task for validating the AMP all-motion prior."""
 
-    commands: BodyVelocityLafanWalkRunCommandsCfg = BodyVelocityLafanWalkRunCommandsCfg()
-    events: BodyVelocityLafanWalkRunEventCfg = BodyVelocityLafanWalkRunEventCfg()
-    rewards: BodyVelocityLafanWalkRunRewardsCfg = BodyVelocityLafanWalkRunRewardsCfg()
+    commands: BodyVelocityAmpAllCommandsCfg = BodyVelocityAmpAllCommandsCfg()
+    events: BodyVelocityAmpAllEventCfg = BodyVelocityAmpAllEventCfg()
+    rewards: BodyVelocityAmpAllRewardsCfg = BodyVelocityAmpAllRewardsCfg()

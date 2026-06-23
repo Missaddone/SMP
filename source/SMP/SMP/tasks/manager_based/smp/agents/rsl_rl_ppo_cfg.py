@@ -81,9 +81,21 @@ class BodyVelocityLafanWalkMatchedPPORunnerCfg(PPORunnerCfg):
 
 
 @configclass
+class BodyVelocityLafanWalkPosturePPORunnerCfg(PPORunnerCfg):
+    experiment_name = "smp_body_velocity_lafan_walk_posture_g1"
+    run_name = "smp_body_velocity_lafan_walk_posture_g1"
+
+
+@configclass
 class BodyVelocityLafanWalkRunPPORunnerCfg(PPORunnerCfg):
     experiment_name = "smp_body_velocity_lafan_walk_run_g1"
     run_name = "smp_body_velocity_lafan_walk_run_g1"
+
+
+@configclass
+class BodyVelocityAmpAllPPORunnerCfg(PPORunnerCfg):
+    experiment_name = "smp_body_velocity_amp_all_g1"
+    run_name = "smp_body_velocity_amp_all_g1"
 
 
 @configclass

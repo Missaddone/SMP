@@ -33,9 +33,9 @@ class BodyVelocityLafanWalkCommandsCfg(CommandsCfg):
         asset_name="robot",
         resampling_time_range=(3.0, 8.0),
         speed_min=0.15,
-        speed_max=1.2,
-        yaw_rate_min=-0.5,
-        yaw_rate_max=0.5,
+        speed_max=1.6,
+        yaw_rate_min=-0.8,
+        yaw_rate_max=0.8,
         stand_sample_prob=0.0,
     )
 
@@ -57,7 +57,7 @@ class BodyVelocityLafanWalkRewardsCfg(RewardsCfg):
             "lin_vel_weight": 0.75,
             "yaw_rate_weight": 0.25,
             "use_stand_branch": False,
-            "style_floor": 0.5,
+            "style_floor": 0.0,
             "fixed_timesteps": (8, 15, 22),
             "ws": 6.0,
         },
