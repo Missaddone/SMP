@@ -12,13 +12,13 @@ from .steering_env_cfg import SmpG1BodyVelocityEnvCfg
 
 @configclass
 class BodyVelocityLafanWalkEventCfg(EventCfg):
-    """Load the LAFAN walking prior while preserving the BodyVelocity setup."""
+    """Load the local-normalized LAFAN walking prior."""
 
     init_smp_state = EventTerm(
         func=mdp.init_smp_state,
         mode="startup",
         params={
-            "ckpt_path": str(PRETRAIN_CKPT_DIR / "pretrained_lafan_walk.pt"),
+            "ckpt_path": str(PRETRAIN_CKPT_DIR / "lafan_walk_local_norm.pt"),
             "gsi_buffer_size": 4096,
             "gsi_batch_size": 1024,
         },
@@ -26,14 +26,7 @@ class BodyVelocityLafanWalkEventCfg(EventCfg):
 
 
 @configclass
-class SmpG1BodyVelocityLafanWalkEnvCfg(SmpG1BodyVelocityEnvCfg):
-    """BodyVelocity task differing only in its LAFAN walking prior."""
-
-    events: BodyVelocityLafanWalkEventCfg = BodyVelocityLafanWalkEventCfg()
-
-
-@configclass
-class BodyVelocityLafanWalkMatchedCommandsCfg(CommandsCfg):
+class BodyVelocityLafanWalkCommandsCfg(CommandsCfg):
     """Commands restricted to the speed range represented by the walk prior."""
 
     steering: CmdTerm = mdp.BodyVelocityCommandCfg(
@@ -48,7 +41,7 @@ class BodyVelocityLafanWalkMatchedCommandsCfg(CommandsCfg):
 
 
 @configclass
-class BodyVelocityLafanWalkMatchedRewardsCfg(RewardsCfg):
+class BodyVelocityLafanWalkRewardsCfg(RewardsCfg):
     """Preserve task feedback while softly applying the LAFAN walk style."""
 
     alive = None
@@ -72,8 +65,21 @@ class BodyVelocityLafanWalkMatchedRewardsCfg(RewardsCfg):
 
 
 @configclass
-class SmpG1BodyVelocityLafanWalkMatchedEnvCfg(SmpG1BodyVelocityLafanWalkEnvCfg):
-    """Walk-prior validation task with matched commands and non-vanishing task reward."""
+class SmpG1BodyVelocityLafanWalkEnvCfg(SmpG1BodyVelocityEnvCfg):
+    """BodyVelocity task matched to the local-normalized LAFAN walking prior."""
 
-    commands: BodyVelocityLafanWalkMatchedCommandsCfg = BodyVelocityLafanWalkMatchedCommandsCfg()
-    rewards: BodyVelocityLafanWalkMatchedRewardsCfg = BodyVelocityLafanWalkMatchedRewardsCfg()
+    commands: BodyVelocityLafanWalkCommandsCfg = BodyVelocityLafanWalkCommandsCfg()
+    events: BodyVelocityLafanWalkEventCfg = BodyVelocityLafanWalkEventCfg()
+    rewards: BodyVelocityLafanWalkRewardsCfg = BodyVelocityLafanWalkRewardsCfg()
+
+
+# Backward-compatible alias for the previously registered matched task id.
+BodyVelocityLafanWalkMatchedCommandsCfg = BodyVelocityLafanWalkCommandsCfg
+BodyVelocityLafanWalkMatchedRewardsCfg = BodyVelocityLafanWalkRewardsCfg
+
+
+@configclass
+class SmpG1BodyVelocityLafanWalkMatchedEnvCfg(SmpG1BodyVelocityLafanWalkEnvCfg):
+    """Alias of the matched local-normalized LAFAN walking task."""
+
+    pass
