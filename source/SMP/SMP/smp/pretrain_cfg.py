@@ -31,9 +31,10 @@ class PretrainCfg:
     max_grad_norm: float = 1.0
 
     name: str = "pretrain"
-    log_interval: int = 10
+    log_interval: int = 1
     save_interval: int = 100
     log_dir: str = "logs/pretrain"
+    use_tensorboard: bool = True
     use_wandb: bool = False
     wandb_project: str = "smp"
 

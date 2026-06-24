@@ -18,7 +18,7 @@ class BodyVelocityLafanWalkEventCfg(EventCfg):
         func=mdp.init_smp_state,
         mode="startup",
         params={
-            "ckpt_path": str(PRETRAIN_CKPT_DIR / "lafan_walk_local_norm.pt"),
+            "ckpt_path": str(PRETRAIN_CKPT_DIR / "lafan_walk_500.pt"),
             "gsi_buffer_size": 4096,
             "gsi_batch_size": 1024,
         },

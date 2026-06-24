@@ -118,6 +118,23 @@ def pretrain(cfg: PretrainCfg) -> Path:
     save_dir = Path(cfg.log_dir) / cfg.name / datetime.now().strftime("%Y%m%d_%H%M%S")
     save_dir.mkdir(parents=True, exist_ok=True)
 
+    tb_writer = None
+    if cfg.use_tensorboard:
+        from torch.utils.tensorboard import SummaryWriter
+
+        tb_writer = SummaryWriter(log_dir=str(save_dir / "tensorboard"))
+        tb_writer.add_text(
+            "config",
+            "\n".join(f"{key}: {value}" for key, value in sorted(vars(cfg).items())),
+            0,
+        )
+        tb_writer.add_scalar("dataset/num_windows", len(dataset), 0)
+        tb_writer.add_scalar("dataset/train_windows", n_train, 0)
+        tb_writer.add_scalar("dataset/val_windows", n_val, 0)
+        tb_writer.add_scalar("dataset/window_size", dataset.window_size, 0)
+        tb_writer.add_scalar("dataset/feature_dim", dataset.feature_dim, 0)
+        tb_writer.add_scalar("model/num_parameters", count_parameters(model), 0)
+
     wandb_run = None
     if cfg.use_wandb:
         import wandb
@@ -143,10 +160,17 @@ def pretrain(cfg: PretrainCfg) -> Path:
             n_batches += 1
 
         train_loss = (total_loss / max(n_batches, 1)).item()
+        if tb_writer is not None:
+            tb_writer.add_scalar("train/loss", train_loss, epoch)
+            tb_writer.add_scalar("train/lr", optimizer.param_groups[0]["lr"], epoch)
+
         if epoch % cfg.log_interval == 0:
             eval_model = ema.shadow if ema is not None else model
             val_loss = validate(eval_model, scheduler, val_loader, device, pin_memory, cfg.num_noise_samples)
             print(f"Epoch {epoch:4d} | train={train_loss:.6f} | val={val_loss:.6f}")
+            if tb_writer is not None:
+                tb_writer.add_scalar("val/loss", val_loss, epoch)
+                tb_writer.flush()
             if wandb_run is not None:
                 wandb_run.log({"epoch": epoch, "train/loss": train_loss, "val/loss": val_loss})
 
@@ -156,6 +180,8 @@ def pretrain(cfg: PretrainCfg) -> Path:
     final_path = save_dir / "pretrained.pt"
     save_checkpoint(final_path, cfg.num_epochs, model, dataset, cfg, ema=ema)
     print(f"Saved final checkpoint to {final_path}")
+    if tb_writer is not None:
+        tb_writer.close()
     if wandb_run is not None:
         wandb_run.finish()
     return final_path

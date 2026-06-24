@@ -35,6 +35,11 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=PretrainCfg.seed)
     parser.add_argument("--use-ema", action="store_true")
     parser.add_argument("--ema-decay", type=float, default=PretrainCfg.ema_decay)
+    parser.add_argument(
+        "--use-tensorboard",
+        action=argparse.BooleanOptionalAction,
+        default=PretrainCfg.use_tensorboard,
+    )
     parser.add_argument("--use-wandb", action="store_true")
     args = parser.parse_args()
 

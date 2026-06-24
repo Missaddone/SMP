@@ -1,11 +1,31 @@
 """LAFAN walk body-velocity task with light posture regularization."""
 
+from isaaclab.managers import CommandTermCfg as CmdTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils import configclass
 
 from . import mdp
-from .body_velocity_lafan_walk_env_cfg import BodyVelocityLafanWalkRewardsCfg, SmpG1BodyVelocityLafanWalkEnvCfg
+from .body_velocity_lafan_walk_env_cfg import (
+    BodyVelocityLafanWalkCommandsCfg,
+    BodyVelocityLafanWalkRewardsCfg,
+    SmpG1BodyVelocityLafanWalkEnvCfg,
+)
+
+
+@configclass
+class BodyVelocityLafanWalkPostureCommandsCfg(BodyVelocityLafanWalkCommandsCfg):
+    """Use a wider command range while keeping the posture-regularized walk prior."""
+
+    steering: CmdTerm = mdp.BodyVelocityCommandCfg(
+        asset_name="robot",
+        resampling_time_range=(3.0, 8.0),
+        speed_min=0.0,
+        speed_max=3.0,
+        yaw_rate_min=-2.0,
+        yaw_rate_max=2.0,
+        stand_sample_prob=0.0,
+    )
 
 
 @configclass
@@ -44,4 +64,5 @@ class BodyVelocityLafanWalkPostureRewardsCfg(BodyVelocityLafanWalkRewardsCfg):
 class SmpG1BodyVelocityLafanWalkPostureEnvCfg(SmpG1BodyVelocityLafanWalkEnvCfg):
     """LAFAN walk task variant for testing explicit anti-hunching rewards."""
 
+    commands: BodyVelocityLafanWalkPostureCommandsCfg = BodyVelocityLafanWalkPostureCommandsCfg()
     rewards: BodyVelocityLafanWalkPostureRewardsCfg = BodyVelocityLafanWalkPostureRewardsCfg()
